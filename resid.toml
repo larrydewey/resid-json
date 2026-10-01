@@ -9,5 +9,11 @@ grant = []
 # The framework this is a format for. src/json.resid imports
 # ../../resid-serial/src/serial.resid, so a checkout beside it works as is;
 # vendored or packed, this entry is what the manifest tool resolves.
+#
+# `path` is local source, and it is all a dependency entry may say: the
+# specification has no url or git key (§28.2, §35), so one path serves both
+# a sibling checkout and a packed build. Published, the framework is at
+# https://github.com/larrydewey/resid-serial — clone it beside this
+# checkout, or vendor it under this path.
 [dependencies.resid-serial]
 path = "../resid-serial"
