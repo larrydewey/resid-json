@@ -1,0 +1,87 @@
+// value.resid — the format-neutral Value tree over CBOR. Decoding a Value
+// asks the format what comes next (read_peek) and skips what it does not
+// know (read_skip), so this is where the self-describing side of the
+// decoder is exercised.
+
+import "../src/json.resid";
+import "../../resid-serial/src/value.resid";
+import "../../resid-serial/src/value.resid";
+import "check.resid";
+
+// Decode, show, and write it back out again: the same hex means the two
+// directions agree.
+Str trip(Str hex) {
+    Result(Value, SerialError) r = from_json(hex);
+    if (Err(e) = r) { return "decode: " + error_text(e); }
+    if (Ok(v) = r) { return show_value(v); }
+    return "unreachable";
+}
+
+Str again(Str hex) {
+    Result(Value, SerialError) r = from_json(hex);
+    if (Err(e) = r) { return "decode: " + error_text(e); }
+    if (Ok(v) = r) { return text_of(to_json(v)); }
+    return "unreachable";
+}
+
+// A Value built in code, encoded, decoded and encoded again: the same
+// bytes both ways. A struct and a map are the same thing on the wire, and
+// so are a variant and its payload, so what is compared is the encoding.
+Bool wire(Str name, Value want) {
+    Result(Str, SerialError) text = to_json(want);
+    if (Err(e) = text) { return check_text(name, "encode: " + error_text(e), "ok"); }
+    return wire_again(name, text, want);
+}
+
+Bool wire_again(Str name, Result(Str, SerialError) text, Value want) {
+    if (Ok(body) = text) {
+        Result(Value, SerialError) r = from_json(body);
+        if (Err(e) = r) { return check_text(name, "decode: " + error_text(e), body); }
+        if (Ok(got) = r) { return check_text(name, text_of(to_json(got)), body); }
+    }
+    return check_text(name, "unreachable", show_value(want));
+}
+
+Int main() {
+    // What each kind reads as.
+    check_text("peek/int", trip("5"), "5");
+    check_text("peek/negative", trip("-1"), "-1");
+    check_text("peek/bool", trip("true"), "true");
+    check_text("peek/null", trip("null"), "None");
+    check_text("peek/float", trip("1.5"), "1.5");
+    check_text("peek/string", trip("\"abc\""), "\"abc\"");
+    check_text("peek/bytes", trip("\"010203\""), "\"010203\"");
+    check_text("peek/array", trip("[1,2,3]"), "[1, 2, 3]");
+    check_text("peek/map", trip("{\"a\":1,\"b\":2}"), "{\"a\": 1, \"b\": 2}");
+    check_text("peek/option", trip("null"), "None");
+    check_text("peek/big int", trip("18446744073709551616"), "18446744073709551616u128");
+    check_text("peek/variant text", trip("\"Dot\""), "\"Dot\"");
+    check_text("peek/variant map", trip("{\"Circle\":3}"), "{\"Circle\": 3}");
+
+    // Written back out, canonical and equal.
+    check_text("again/array", again("[1,2,3]"), "[1,2,3]");
+    check_text("again/map", again("{\"a\": 1, \"b\": 2}"), "{\"a\":1,\"b\":2}");
+    check_text("again/indefinite becomes definite", again("[1, 2]"), "[1,2]");
+    check_text("again/indefinite string", again("[1, 2]"), "[1,2]");
+    check_text("again/variant", again("{\"Circle\": 3}"), "{\"Circle\":3}");
+    check_text("again/half float", again("1.5"), "1.5");
+    check_text("again/bignum", again("[1, 2]"), "[1,2]");
+
+    // Values built here, through the encoder and back.
+    wire("value/bool", VBool(false));
+    wire("value/int", VInt(0 - 7));
+    wire("value/uint", VUInt(18446744073709551615));
+    wire("value/i128", VI128(i128(0) - i128(170141183460469231731687303715884105727)));
+    wire("value/u128", VU128(u128(340282366920938463463374607431768211455)));
+    wire("value/float", VFloat(0.1));
+    wire("value/str", VStr("héllo"));
+    wire("value/bytes", VBytes([0, 1, 255]));
+    wire("value/none", VNone);
+    wire("value/seq", VSeq([VInt(1), VStr("x"), VBool(true)]));
+    wire("value/map", VMap([ventry(VStr("k"), VSeq([]))]));
+    wire("value/struct", vstruct("Pt", [vfield("x", VInt(1)), vfield("y", VInt(2))]));
+    wire("value/variant", VVariant(VPayload {.tag = vtag("Shape", 0, "Circle"), .payload = VInt(3)}));
+    wire("value/nested", VSeq([VSome(VMap([ventry(VStr("k"), VUnitVariant(vtag("E", 0, "None")))]))]));
+
+    return 0;
+}

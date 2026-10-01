@@ -1,0 +1,44 @@
+ok   e/quote
+ok   e/backslash
+ok   e/slash
+ok   e/tab
+ok   e/newline
+ok   e/return
+ok   e/backspace
+ok   e/formfeed
+ok   e/other control
+ok   e/unicode stays
+ok   e/emoji stays
+ok   r/simple
+ok   r/slash
+ok   r/hex digits both cases
+ok   r/astral
+ok   r/astral pair in text
+ok   r/bmp
+ok   trip/plain
+ok   trip/quote
+ok   trip/backslash
+ok   trip/newline
+ok   trip/control
+ok   trip/utf8
+ok   trip/emoji
+ok   trip/empty
+ok   trip/only quotes
+ok   n/zero
+ok   n/negative zero
+ok   n/plus in exponent
+ok   n/minus in exponent
+ok   n/capital e
+ok   n/fraction only
+ok   n/trailing dot
+ok   n/long fraction
+ok   n/int as float
+ok   n/as int
+ok   n/big
+ok   n/too big for Int
+ok   n/exponent is not an int
+ok   n/fraction is not an int
+ok   w/around array
+ok   w/newlines
+ok   w/around object
+exit 0

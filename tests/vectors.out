@@ -1,0 +1,46 @@
+ok   w/null
+ok   w/true
+ok   w/false
+ok   w/int
+ok   w/negative
+ok   w/big int
+ok   w/string
+ok   w/empty string
+ok   w/float
+ok   w/array
+ok   w/nested array
+ok   w/empty array
+ok   w/struct
+ok   w/option none
+ok   w/option some
+ok   w/variant unit
+ok   w/variant payload
+ok   w/bytes
+ok   w/utf8
+ok   w/control chars
+ok   w/map
+ok   w/number keys
+ok   r/int
+ok   r/whitespace
+ok   r/empty array
+ok   r/negative
+ok   r/string
+ok   r/empty string
+ok   r/escapes
+ok   r/unicode escape
+ok   r/surrogate pair
+ok   r/utf8 raw
+ok   r/struct
+ok   r/struct any order
+ok   r/struct extra field
+ok   r/variant unit
+ok   r/variant payload
+ok   r/bytes
+ok   r/float from int
+ok   r/float from float
+ok   r/float from exponent
+ok   r/float negative exponent
+ok   r/i128
+ok   r/i128 negative
+ok   r/u128
+exit 0

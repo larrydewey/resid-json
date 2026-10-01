@@ -1,0 +1,41 @@
+ok   e/empty
+ok   e/whitespace only
+ok   e/garbage
+ok   e/trailing comma
+ok   e/missing comma
+ok   e/unclosed array
+ok   e/unclosed object
+ok   n/leading zero
+ok   n/leading plus
+ok   n/dot alone
+ok   n/trailing dot
+ok   n/exponent alone
+ok   n/empty exponent
+ok   n/space in number
+ok   s/unterminated
+ok   s/bad escape
+ok   s/short escape
+ok   s/bad hex
+ok   s/short \u
+ok   s/lone high surrogate
+ok   s/lone low surrogate
+ok   s/unterminated string
+ok   t/int as string
+ok   t/string as int
+ok   t/bool as int
+ok   t/null as int
+ok   t/array as struct
+ok   t/object as array
+ok   t/number field name
+ok   t/missing colon
+ok   f/missing
+ok   f/duplicate
+ok   v/unknown
+ok   v/object with two keys
+ok   v/number
+ok   b/odd length
+ok   b/not hex
+ok   w/nan
+ok   w/infinity
+ok   w/infinity back
+exit 0

@@ -1,0 +1,18 @@
+ok   config/text
+ok   config/back
+ok   config/alias
+ok   config/minimal
+ok   config/skipped
+ok   config/deny unknown
+ok   event/started
+ok   event/stopped
+ok   event/back
+ok   event/unit back
+ok   event/unknown kind
+ok   meters
+ok   meters/back
+ok   loose/num
+ok   loose/word
+ok   loose/nothing
+ok   loose/ambiguous
+exit 0

@@ -1,0 +1,742 @@
+// json.resid — JSON (RFC 8259) as a format for resid-serial.
+//
+// The encoder state is the text written so far, newest chunk first, so
+// every write is O(1) and `json_text` reverses it once at the end. The
+// decoder state is the input, the read position, and a stack of the open
+// containers: whether the next `,` is expected, or, inside a string being
+// pulled a code point at a time, where the next one starts.
+//
+// JSON has no lengths, no tags and no byte strings, so the mapping is the
+// narrow one:
+//
+//   struct          an object with the field names as keys
+//   variant         a unit variant is its name as a string, a variant with
+//                   a payload is {"Name": payload}
+//   map             an object; every key is written as a string, since
+//                   JSON has no other kind of key
+//   option          None is null, Some(v) is v
+//   unit            null
+//   bytes           a hex string (JSON has no byte string)
+//   Int(128)        decimal text
+//   Float           its shortest shown text; NaN and infinity are rejected,
+//                   since JSON cannot spell them
+//
+// Output is compact: no spaces, no newlines. Whitespace between tokens is
+// accepted on the way in.
+
+import "../../resid-serial/src/serial.resid";
+import "lex.resid";
+
+// ─── The encoder ─────────────────────────────────────────────────────
+
+type JOut = JoNil | JoCons(JCell);
+type JCell = { JOut next; Str s; };
+
+type JsonEnc = { JOut out; Bool first; Bool in_key; Str hex; };
+
+pub JsonEnc json_encoder() { return JsonEnc {.out = JoNil, .first = true, .in_key = false, .hex = ""}; }
+
+// The text written. Consumes the state.
+pub Str json_text(JsonEnc e) { return str_join(jo_list(e.out, ListBuf()), ""); }
+
+List(Str) jo_list(JOut o, ListBuf(Str) b) {
+    return match o { JoNil => b.finish().reverse(), JoCons(c) => jo_list(c.next, b.push(c.s)) };
+}
+
+// Internal writes cannot fail, so they carry no Result: the verbs below
+// are the only place the format can report one.
+JsonEnc je_push(JsonEnc e, Str s) {
+    JCell c = JCell {.next = e.out, .s = s};
+    return JsonEnc {.out = JoCons(c), .first = e.first, .in_key = e.in_key, .hex = e.hex};
+}
+
+// A comma before every item of a compound but the first, and the flag that
+// remembers there was one.
+JsonEnc je_comma(JsonEnc e) {
+    if (e.first) { return JsonEnc {.out = e.out, .first = false, .in_key = false, .hex = e.hex}; }
+    return je_push(e, ",");
+}
+
+// Opening a compound: nothing has been written into it yet.
+JsonEnc je_open(JsonEnc e, Str bracket) {
+    JCell c = JCell {.next = e.out, .s = bracket};
+    return JsonEnc {.out = JoCons(c), .first = true, .in_key = false, .hex = e.hex};
+}
+
+JsonEnc je_close(JsonEnc e, Str bracket) { return je_push(e, bracket); }
+
+JsonEnc je_raw(JsonEnc e, Str s) { return je_push(e, s); }
+
+// A JSON string literal: the quotes and the escapes.
+JsonEnc je_string(JsonEnc e, Str v) { return je_push(e, "\"" + json_escape(v) + "\""); }
+
+// A number as its decimal text.
+JsonEnc je_int(JsonEnc e, Int v) { return je_push(e, f"{v}"); }
+
+JsonEnc je_uint(JsonEnc e, UInt(64) v) { return je_push(e, f"{v}"); }
+
+JsonEnc je_i128(JsonEnc e, Int(128) v) { return je_push(e, f"{v}"); }
+
+JsonEnc je_u128(JsonEnc e, UInt(128) v) { return je_push(e, f"{v}"); }
+
+// A float as it shows, which JSON accepts: no leading plus, no bare
+// integer-only spelling that would change the type.
+JsonEnc je_float(JsonEnc e, Float v) { return je_push(e, f"{v}"); }
+
+JsonEnc je_key(JsonEnc e, Str key) { return je_string(e, key); }
+
+// A key that is not a string yet: JSON keys are strings, so whatever the
+// type wrote is quoted. Decoding asks for a Str and finds one.
+JsonEnc je_key_num(JsonEnc e, Str shown) { return je_push(e, "\"" + json_escape(shown) + "\""); }
+
+Result(JsonEnc, SerialError) je_unit(JsonEnc e) { return Ok(je_push(e, "null")); }
+Result(JsonEnc, SerialError) je_bool(JsonEnc e, Bool v) { return Ok(je_push(e, if (v) { "true" } else { "false" })); }
+
+Result(JsonEnc, SerialError) je_int_v(JsonEnc e, Int v) {
+    if (e.in_key) { return Ok(je_key_num(e, f"{v}")); }
+    return Ok(je_int(e, v));
+}
+
+Result(JsonEnc, SerialError) je_uint_v(JsonEnc e, UInt(64) v) {
+    if (e.in_key) { return Ok(je_key_num(e, f"{v}")); }
+    return Ok(je_uint(e, v));
+}
+
+Result(JsonEnc, SerialError) je_i128_v(JsonEnc e, Int(128) v) {
+    if (e.in_key) { return Ok(je_key_num(e, f"{v}")); }
+    return Ok(je_i128(e, v));
+}
+
+Result(JsonEnc, SerialError) je_u128_v(JsonEnc e, UInt(128) v) {
+    if (e.in_key) { return Ok(je_key_num(e, f"{v}")); }
+    return Ok(je_u128(e, v));
+}
+
+Result(JsonEnc, SerialError) je_float_v(JsonEnc e, Float v) {
+    if (cb_nan_or_inf(v)) { return Err(invalid_value(f"{v}", "a finite JSON number")); }
+    if (e.in_key) { return Ok(je_key_num(e, f"{v}")); }
+    return Ok(je_float(e, v));
+}
+
+Bool cb_nan_or_inf(Float v) { return v != v || (v > 0.0 && v / 2.0 == v); }
+
+Result(JsonEnc, SerialError) je_str_v(JsonEnc e, Str v) { return Ok(je_string(e, v)); }
+
+Result(JsonEnc, SerialError) je_bytes(JsonEnc e, List(Int) v) { return Ok(je_string(e, json_hex(v))); }
+
+// Streamed strings arrive as code points; a heap string is simpler, and the
+// two produce the same text.
+// A streamed string opens and closes the quotes itself.
+Result(JsonEnc, SerialError) je_str_begin(JsonEnc e, Int chars, Int bytes) { return Ok(je_push(e, "\"")); }
+
+Result(JsonEnc, SerialError) je_str_char(JsonEnc e, Int cp) { return Ok(je_push(e, str_from_code(cp))); }
+
+Result(JsonEnc, SerialError) je_str_end(JsonEnc e) { return Ok(je_push(e, "\"")); }
+
+// Streamed bytes arrive one at a time, so the hex they are written as is
+// gathered until the end.
+Result(JsonEnc, SerialError) je_bytes_begin(JsonEnc e, Int len) { return Ok(jd_clear_hex(e)); }
+
+Result(JsonEnc, SerialError) je_byte(JsonEnc e, Int b) { return Ok(jd_add_hex(e, b)); }
+
+Result(JsonEnc, SerialError) je_bytes_end(JsonEnc e) { return Ok(je_string(e, jd_take_hex(e))); }
+
+JsonEnc jd_clear_hex(JsonEnc e) { return JsonEnc {.out = e.out, .first = e.first, .in_key = e.in_key, .hex = ""}; }
+
+JsonEnc jd_add_hex(JsonEnc e, Int b) {
+    Str digits = "0123456789abcdef";
+    Int hi = (b >> 4) & 15;
+    Int lo = b & 15;
+    return JsonEnc {.out = e.out, .first = e.first, .in_key = e.in_key, .hex = e.hex + str_slice(digits, hi, hi + 1) + str_slice(digits, lo, lo + 1)};
+}
+
+Str jd_take_hex(JsonEnc e) { return e.hex; }
+
+Result(JsonEnc, SerialError) je_none(JsonEnc e) { return Ok(je_push(e, "null")); }
+Result(JsonEnc, SerialError) je_some(JsonEnc e) { return Ok(e); }
+
+Result(JsonEnc, SerialError) je_seq_begin(JsonEnc e, Int len) { return Ok(je_open(e, "[")); }
+Result(JsonEnc, SerialError) je_seq_elem(JsonEnc e) { return Ok(je_comma(e)); }
+Result(JsonEnc, SerialError) je_seq_end(JsonEnc e) { return Ok(je_close(e, "]")); }
+
+Result(JsonEnc, SerialError) je_map_begin(JsonEnc e, Int len) { return Ok(je_open(e, "{")); }
+
+Result(JsonEnc, SerialError) je_map_key(JsonEnc e) {
+    JsonEnc e1 = je_comma(e);
+    return Ok(JsonEnc {.out = e1.out, .first = false, .in_key = true, .hex = e1.hex});
+}
+
+Result(JsonEnc, SerialError) je_map_value(JsonEnc e) {
+    JsonEnc e1 = je_push(e, ":");
+    return Ok(JsonEnc {.out = e1.out, .first = false, .in_key = false, .hex = e1.hex});
+}
+
+Result(JsonEnc, SerialError) je_map_end(JsonEnc e) { return Ok(je_close(e, "}")); }
+
+Result(JsonEnc, SerialError) je_struct_begin(JsonEnc e, Str name, Int len) { return Ok(je_open(e, "{")); }
+// A struct field is `"name":` — the protocol announces the key, and JSON
+// wants the colon after it.
+Result(JsonEnc, SerialError) je_field(JsonEnc e, Str key) {
+    JsonEnc e1 = je_key(je_comma(e), key);
+    return Ok(je_push(e1, ":"));
+}
+Result(JsonEnc, SerialError) je_struct_end(JsonEnc e) { return Ok(je_close(e, "}")); }
+
+// Unit variants write their name as it is; a variant with a payload opens
+// an object under that name.
+Result(JsonEnc, SerialError) je_unit_variant(JsonEnc e, Str enum_name, Int index, Str variant) { return Ok(je_string(e, variant)); }
+
+Result(JsonEnc, SerialError) je_variant_begin(JsonEnc e, Str enum_name, Int index, Str variant) {
+    JsonEnc e1 = je_open(e, "{");
+    JsonEnc e2 = je_key(e1, variant);
+    JsonEnc e3 = je_push(e2, ":");
+    return Ok(JsonEnc {.out = e3.out, .first = false, .in_key = false, .hex = e3.hex});
+}
+
+Result(JsonEnc, SerialError) je_variant_end(JsonEnc e) { return Ok(je_close(e, "}")); }
+Bool je_human(JsonEnc e) { return true; }
+
+Encoder(JsonEnc) = {
+    .write_unit = je_unit, .write_bool = je_bool, .write_int = je_int_v, .write_uint = je_uint_v,
+    .write_i128 = je_i128_v, .write_u128 = je_u128_v,
+    .write_float = je_float_v, .write_str = je_str_v, .write_bytes = je_bytes, .write_none = je_none,
+    .write_str_begin = je_str_begin, .write_str_char = je_str_char, .write_str_end = je_str_end,
+    .write_bytes_begin = je_bytes_begin, .write_byte = je_byte, .write_bytes_end = je_bytes_end,
+    .write_some = je_some, .write_seq_begin = je_seq_begin, .write_seq_elem = je_seq_elem, .write_seq_end = je_seq_end,
+    .write_map_begin = je_map_begin, .write_map_key = je_map_key, .write_map_value = je_map_value, .write_map_end = je_map_end,
+    .write_struct_begin = je_struct_begin, .write_field = je_field, .write_struct_end = je_struct_end,
+    .write_unit_variant = je_unit_variant, .write_variant_begin = je_variant_begin, .write_variant_end = je_variant_end,
+    .encodes_human_readable = je_human
+};
+
+@needs(Encode(T, JsonEnc))
+pub Result(Str, SerialError) to_json(T x) {
+    JsonEnc e = encode(x, json_encoder())?;
+    return Ok(json_text(e));
+}
+
+// ─── The decoder ─────────────────────────────────────────────────────
+
+// An open container. JSON has no lengths, so `first` is all that matters
+// for a sequence or an object: whether the `,` before the next item is
+// still ahead. JaStr carries the position of the next code point of a
+// string being pulled one at a time.
+type JFrame = JaSeq(Bool) | JaObj(Bool) | JaStr(Int) | JaHex(Str);
+
+type JsonDec = {
+    Str in;
+    Int pos;
+    List(JFrame) open;
+    Int vmaps;         // variant objects still to be closed
+    Int payloads;      // variant objects whose payload is still to come
+};
+
+pub JsonDec json_decoder(Str s) {
+    List(JFrame) none = [];
+    return JsonDec {.in = s, .pos = 0, .open = none, .vmaps = 0, .payloads = 0};
+}
+
+JsonDec jd_at(JsonDec d, Int pos, List(JFrame) open) { return JsonDec {.in = d.in, .pos = pos, .open = open, .vmaps = d.vmaps, .payloads = d.payloads}; }
+
+JsonDec jd_push(JsonDec d, JFrame f) { return jd_at(d, d.pos, d.open.concat([f])); }
+
+JsonDec jd_pop(JsonDec d) {
+    Int k = d.open.len();
+    if (k == 0) { return d; }
+    return jd_at(d, d.pos, d.open[0..k - 1]);
+}
+
+JsonDec jd_set_top(JsonDec d, JFrame f) {
+    Int k = d.open.len();
+    if (k == 0) { return d; }
+    return jd_at(d, d.pos, d.open[0..k - 1].concat([f]));
+}
+
+// The top frame, of the kind asked for: 4 sequence, 5 object, 6 string.
+type JLeft = { Bool ok; Bool first; Str why; };
+
+JLeft jl_miss(Str why) { return JLeft {.ok = false, .first = false, .why = why}; }
+
+JLeft jd_left(JsonDec d, Int kind) {
+    Int k = d.open.len();
+    if (k == 0) { return jl_miss("no container is open"); }
+    JFrame f = d.open[k - 1];
+    return match f {
+        JaSeq(first) => if (kind == 4) { JLeft {.ok = true, .first = first, .why = ""} } else { jl_miss("no array is open") },
+        JaObj(first) => if (kind == 5) { JLeft {.ok = true, .first = first, .why = ""} } else { jl_miss("no object is open") },
+        JaStr(next) => if (kind == 6) { JLeft {.ok = true, .first = false, .why = ""} } else { jl_miss("no string is open") },
+        JaHex(rest) => if (kind == 7) { JLeft {.ok = true, .first = false, .why = ""} } else { jl_miss("no byte string is open") }
+    };
+}
+
+Int jd_top_kind(JsonDec d) {
+    Int k = d.open.len();
+    if (k == 0) { return 0; }
+    JFrame f = d.open[k - 1];
+    return match f { JaSeq(first) => 4, JaObj(first) => 5, JaStr(next) => 6, JaHex(rest) => 7 };
+}
+
+// Whitespace between tokens is not significant.
+JsonDec jd_ws(JsonDec d) { return jd_ws_at(d, d.pos); }
+
+JsonDec jd_ws_at(JsonDec d, Int i) {
+    if (i >= str_len(d.in)) { return jd_at(d, i, d.open); }
+    Int c = str_char_at(d.in, i);
+    if (c == 32 || c == 9 || c == 10 || c == 13) { return jd_ws_at(d, i + 1); }
+    return jd_at(d, i, d.open);
+}
+
+// The byte at the read position, whitespace skipped.
+Result(Parsed(Int, JsonDec), SerialError) jd_peek_char(JsonDec d, Str what) {
+    JsonDec d1 = jd_ws(d);
+    if (d1.pos >= str_len(d1.in)) { return Err(eof_error(what)); }
+    return parsed(str_char_at(d1.in, d1.pos), d1);
+}
+
+// One expected character, whitespace skipped.
+Result(JsonDec, SerialError) jd_expect(JsonDec d, Int c, Str what) {
+    Result(Parsed(Int, JsonDec), SerialError) p = jd_peek_char(d, what);
+    if (Err(e) = p) { return Err(e); }
+    if (Ok(got) = p) {
+        if (got.value != c) { return Err(syntax_error(f"expected {what}, found {jd_name(got.value)}")); }
+        return Ok(jd_at(got.rest, got.rest.pos + 1, got.rest.open));
+    }
+    return Err(eof_error(what));
+}
+
+Str jd_name(Int c) {
+    if (c == 123) { return "'{'"; }
+    if (c == 125) { return "'}'"; }
+    if (c == 91) { return "'['"; }
+    if (c == 93) { return "']'"; }
+    if (c == 44) { return "','"; }
+    if (c == 58) { return "':'"; }
+    if (c == 34) { return "a string"; }
+    return f"'{str_from_code(c)}'";
+}
+
+// A literal of letters: matched at the read position, whitespace skipped,
+// and the state moves past it.
+Result(JsonDec, SerialError) jd_literal(JsonDec d, Str lit) {
+    JsonDec d1 = jd_ws(d);
+    JsonDec d2 = jd_literal_at(d1, 0, lit)?;
+    return Ok(jd_at(d2, d2.pos + str_len(lit), d2.open));
+}
+
+Result(JsonDec, SerialError) jd_literal_at(JsonDec d, Int i, Str lit) {
+    if (i >= str_len(lit)) { return Ok(d); }
+    Int j = d.pos + i;
+    if (j >= str_len(d.in) || str_char_at(d.in, j) != str_char_at(lit, i)) {
+        return Err(syntax_error(f"expected {lit}"));
+    }
+    return jd_literal_at(d, i + 1, lit);
+}
+
+// ─── Scalars ─────────────────────────────────────────────────────────
+
+Result(JsonDec, SerialError) jd_unit(JsonDec d) {
+    Parsed(Bool, JsonDec) t = jd_option(d)?;
+    if (t.value) { return Err(invalid_type("null", jd_what(d))); }
+    return Ok(t.rest);
+}
+
+Result(Parsed(Bool, JsonDec), SerialError) jd_bool(JsonDec d) {
+    Result(Parsed(Int, JsonDec), SerialError) p = jd_peek_char(d, "a boolean");
+    if (Err(e) = p) { return Err(e); }
+    if (Ok(c) = p) {
+        if (c.value == 116) { return parsed(true, jd_literal(c.rest, "true")?); }
+        if (c.value == 102) { return parsed(false, jd_literal(c.rest, "false")?); }
+        return Err(invalid_type("a boolean", jd_what(c.rest)));
+    }
+    return Err(eof_error("a boolean"));
+}
+
+// What comes next, for an error message.
+Str jd_what(JsonDec d) {
+    Result(Parsed(Int, JsonDec), SerialError) p = jd_peek_char(d, "a value");
+    if (Err(e) = p) { return "the end of the input"; }
+    if (Ok(c) = p) { return jd_name_of(d, c.value); }
+    return "a value";
+}
+
+Str jd_name_of(JsonDec d, Int c) {
+    if (c == 110) { return "null"; }
+    if (c == 116 || c == 102) { return "a boolean"; }
+    if (c == 34) { return "a string"; }
+    if (c == 91) { return "a sequence"; }
+    if (c == 123) { return "an object"; }
+    if (c == 45 || (c >= 48 && c <= 57)) { return "a number"; }
+    return jd_name(c);
+}
+
+Result(Parsed(Int, JsonDec), SerialError) jd_int(JsonDec d) {
+    Parsed(NumTok, JsonDec) num = jd_number_as(d, "an integer")?;
+    NumTok tok = num.value;
+    if (!tok.whole) { return Err(invalid_type("an integer", "a number with a fraction or an exponent")); }
+    Int n = json_int(tok.text, "an integer")?;
+    return parsed(n, num.rest);
+}
+
+Result(Parsed(UInt(64), JsonDec), SerialError) jd_uint(JsonDec d) {
+    Parsed(NumTok, JsonDec) num = jd_number_as(d, "an unsigned integer")?;
+    NumTok tok = num.value;
+    if (!tok.whole) { return Err(invalid_type("an unsigned integer", "a number with a fraction or an exponent")); }
+    if (str_starts_with(tok.text, "-")) { return Err(invalid_type("an unsigned integer", "a negative number")); }
+    Int n = json_int(tok.text, "an unsigned integer")?;
+    if (n < 0) { return Err(invalid_value(tok.text, "an unsigned integer")); }
+    return parsed((UInt(64))n, num.rest);
+}
+
+Result(Parsed(Int(128), JsonDec), SerialError) jd_i128(JsonDec d) {
+    Parsed(NumTok, JsonDec) num = jd_number_as(d, "a 128-bit integer")?;
+    NumTok tok = num.value;
+    if (!tok.whole) { return Err(invalid_type("a 128-bit integer", "a number with a fraction or an exponent")); }
+    if (str_starts_with(tok.text, "-")) { return parsed(i128(0) - i128_digits(str_slice(tok.text, 1, str_len(tok.text)), 0, i128(0)), num.rest); }
+    return parsed(i128_digits(tok.text, 0, i128(0)), num.rest);
+}
+
+Result(Parsed(UInt(128), JsonDec), SerialError) jd_u128(JsonDec d) {
+    Parsed(NumTok, JsonDec) num = jd_number_as(d, "an unsigned 128-bit integer")?;
+    NumTok tok = num.value;
+    if (!tok.whole) { return Err(invalid_type("an unsigned 128-bit integer", "a number with a fraction or an exponent")); }
+    if (str_starts_with(tok.text, "-")) { return Err(invalid_type("an unsigned 128-bit integer", "a negative number")); }
+    return parsed(u128_digits(tok.text, 0, u128(0)), num.rest);
+}
+
+// The number token at the read position, whitespace skipped. `what` names
+// the type asked for, so a token that is not a number at all says so.
+Result(Parsed(NumTok, JsonDec), SerialError) jd_number_as(JsonDec d, Str what) {
+    Result(Parsed(Int, JsonDec), SerialError) c = jd_peek_char(d, "a number");
+    if (Err(e) = c) { return Err(e); }
+    if (Ok(got) = c) {
+        Int ch = got.value;
+        if (ch != 45 && (ch < 48 || ch > 57)) { return Err(invalid_type(what, jd_name_of(got.rest, ch))); }
+    }
+    return jd_number(got_or(d, what));
+}
+
+// The state the peek was taken from, or the plain one when the peek failed.
+JsonDec got_or(JsonDec d, Str what) { return d; }
+
+Result(Parsed(NumTok, JsonDec), SerialError) jd_number(JsonDec d) {
+    JsonDec d1 = jd_ws(d);
+    if (d1.pos >= str_len(d1.in)) { return Err(eof_error("a number")); }
+    NumTok tok = lex_number(d1.in, d1.pos)?;
+    return parsed(tok, jd_at(d1, tok.end, d1.open));
+}
+
+Result(Parsed(Float, JsonDec), SerialError) jd_float(JsonDec d) {
+    Parsed(NumTok, JsonDec) num = jd_number_as(d, "a float")?;
+    return parsed(str_parse_float(num.value.text), num.rest);
+}
+
+// A string in full: the quotes, the escapes, and the text between them.
+Result(Parsed(Str, JsonDec), SerialError) jd_str(JsonDec d) {
+    JsonDec d1 = jd_expect(d, 34, "a string")?;
+    return jd_str_body(d1, StrBuf());
+}
+
+// The body up to the closing quote, in the builder.
+Result(Parsed(Str, JsonDec), SerialError) jd_str_body(JsonDec d, StrBuf b) {
+    if (d.pos >= str_len(d.in)) { Str dropped = b.finish(); return Err(eof_error("a string")); }
+    Int c = str_char_at(d.in, d.pos);
+    if (c == 34) { return parsed(b.finish(), jd_at(d, d.pos + 1, d.open)); }
+    Result(JsonCp, SerialError) r = json_cp_at(d.in, d.pos, "a string");
+    if (Err(e) = r) { Str dropped2 = b.finish(); return Err(e); }
+    if (Ok(cp) = r) { return jd_str_body(jd_at(d, cp.next, d.open), b.push_char(cp.cp)); }
+    Str dropped = b.finish();
+    return parsed(dropped, d);
+}
+
+// read_str_begin starts the same scan and leaves the frame open, so
+// read_str_next can pull one code point at a time.
+Result(Parsed(Int, JsonDec), SerialError) jd_str_begin(JsonDec d) {
+    JsonDec d1 = jd_expect(d, 34, "a string")?;
+    return parsed(0 - 1, jd_push(d1, JaStr(d1.pos)));
+}
+
+Result(Parsed(Int, JsonDec), SerialError) jd_str_next(JsonDec d) {
+    JLeft left = jd_left(d, 6);
+    if (!left.ok) { return Err(custom_error(left.why)); }
+    Result(Parsed(Int, JsonDec), SerialError) c = jd_peek_char(d, "a string");
+    if (Err(e) = c) { return Err(e); }
+    if (Ok(got) = c) {
+        if (got.value == 34) { return parsed(0 - 1, jd_pop(jd_at(got.rest, got.rest.pos + 1, got.rest.open))); }
+        JsonCp cp = json_cp_at(got.rest.in, got.rest.pos, "a string")?;
+        return parsed(cp.cp, jd_set_top(jd_at(got.rest, cp.next, got.rest.open), JaStr(cp.next)));
+    }
+    return Err(eof_error("a string"));
+}
+
+// Bytes as the hex string JSON has no byte string for.
+Result(Parsed(List(Int), JsonDec), SerialError) jd_bytes(JsonDec d) {
+    Parsed(Str, JsonDec) s = jd_str(d)?;
+    Result(List(Int), SerialError) r = json_unhex(s.value);
+    if (Err(e) = r) { return Err(e); }
+    if (Ok(bs) = r) { return parsed(bs, s.rest); }
+    return Err(eof_error("bytes"));
+}
+
+Result(Parsed(Int, JsonDec), SerialError) jd_bytes_begin(JsonDec d) {
+    Parsed(Str, JsonDec) s = jd_str(d)?;
+    List(Int) bs = json_unhex(s.value)?;
+    return parsed(bs.len(), jd_push(s.rest, JaHex(s.value)));
+}
+
+// The next byte of the hex: two digits, then the frame holds what is left.
+Result(Parsed(Int, JsonDec), SerialError) jd_bytes_next(JsonDec d) {
+    JLeft left = jd_left(d, 7);
+    if (!left.ok) { return Err(custom_error(left.why)); }
+    JFrame top = jd_frame_at(d);
+    Str rest = jd_frame_hex(top);
+    if (str_len(rest) < 2) { return parsed(0 - 1, jd_pop(d)); }
+    List(Int) one = json_unhex(str_slice(rest, 0, 2))?;
+    Int b = jd_first_byte(one);
+    return parsed(b, jd_set_top(d, JaHex(str_slice(rest, 2, str_len(rest)))));
+}
+
+// The top frame, whatever kind it is.
+JFrame jd_frame_at(JsonDec d) {
+    Int k = d.open.len();
+    if (k == 0) { return JaHex(""); }
+    return d.open[k - 1];
+}
+
+Str jd_frame_hex(JFrame f) { return match f { JaHex(rest) => rest, JaSeq(first) => "", JaObj(first) => "", JaStr(next) => "" }; }
+
+Int jd_first_byte(List(Int) bs) { return bs[0]; }
+
+// ─── Options ─────────────────────────────────────────────────────────
+
+// null is None; anything else is Some, left unread.
+Result(Parsed(Bool, JsonDec), SerialError) jd_option(JsonDec d) {
+    Result(Parsed(Int, JsonDec), SerialError) p = jd_peek_char(d, "an option");
+    if (Err(e) = p) { return Err(e); }
+    if (Ok(c) = p) {
+        if (c.value == 110) { return parsed(false, jd_literal(c.rest, "null")?); }
+        return parsed(true, c.rest);
+    }
+    return Err(eof_error("an option"));
+}
+
+// ─── Sequences and maps ──────────────────────────────────────────────
+
+Result(Parsed(Int, JsonDec), SerialError) jd_seq_begin(JsonDec d) {
+    JsonDec d1 = jd_expect(d, 91, "'['")?;
+    return parsed(0 - 1, jd_push(d1, JaSeq(true)));
+}
+
+Result(Parsed(Bool, JsonDec), SerialError) jd_seq_next(JsonDec d) {
+    JLeft left = jd_left(d, 4);
+    if (!left.ok) { return Err(custom_error(left.why)); }
+    Result(Parsed(Int, JsonDec), SerialError) c = jd_peek_char(d, "']' or a value");
+    if (Err(e) = c) { return Err(e); }
+    if (Ok(got) = c) {
+        if (got.value == 93) { return parsed(false, jd_pop(jd_at(got.rest, got.rest.pos + 1, got.rest.open))); }
+        return parsed(true, jd_item_start(got.rest, left.first, 4)?);
+    }
+    return Err(eof_error("']' or a value"));
+}
+
+// The comma before an item that is not the first, and the flag that
+// remembers one is coming.
+Result(JsonDec, SerialError) jd_item_start(JsonDec d, Bool first, Int kind) {
+    JsonDec d1 = if (first) { d } else { jd_comma(d)? };
+    return Ok(jd_set_top(d1, if (kind == 4) { JaSeq(false) } else { JaObj(false) }));
+}
+
+Result(JsonDec, SerialError) jd_comma(JsonDec d) { return jd_expect(d, 44, "','"); }
+
+Result(Parsed(Int, JsonDec), SerialError) jd_map_begin(JsonDec d) {
+    JsonDec d1 = jd_expect(d, 123, "'{'")?;
+    return parsed(0 - 1, jd_push(d1, JaObj(true)));
+}
+
+Result(Parsed(Bool, JsonDec), SerialError) jd_map_next(JsonDec d) {
+    JLeft left = jd_left(d, 5);
+    if (!left.ok) { return Err(custom_error(left.why)); }
+    Result(Parsed(Int, JsonDec), SerialError) c = jd_peek_char(d, "'}' or a key");
+    if (Err(e) = c) { return Err(e); }
+    if (Ok(got) = c) {
+        if (got.value == 125) { return parsed(false, jd_pop(jd_at(got.rest, got.rest.pos + 1, got.rest.open))); }
+        return parsed(true, jd_item_start(got.rest, left.first, 5)?);
+    }
+    return Err(eof_error("'}' or a key"));
+}
+
+Result(JsonDec, SerialError) jd_map_value(JsonDec d) { return jd_expect(d, 58, "':'"); }
+
+// ─── Structs ─────────────────────────────────────────────────────────
+
+Result(JsonDec, SerialError) jd_struct_begin(JsonDec d, Str name, List(Str) fields) {
+    JsonDec d1 = jd_expect(d, 123, "'{'")?;
+    return Ok(jd_push(d1, JaObj(true)));
+}
+
+Result(Parsed(FieldKey, JsonDec), SerialError) jd_field(JsonDec d, List(Str) fields) {
+    JLeft left = jd_left(d, 5);
+    if (!left.ok) { return Err(custom_error(left.why)); }
+    Result(Parsed(Int, JsonDec), SerialError) c = jd_peek_char(d, "'}' or a field name");
+    if (Err(e) = c) { return Err(e); }
+    if (Ok(got) = c) {
+        if (got.value == 125) { return parsed(EndOfFields, jd_pop(jd_at(got.rest, got.rest.pos + 1, got.rest.open))); }
+        return jd_field_name(jd_item_start(got.rest, left.first, 5)?, fields);
+    }
+    return Err(eof_error("'}' or a field name"));
+}
+
+// The protocol has no "map value" verb for a struct, so the colon after
+// the key is read here.
+Result(Parsed(FieldKey, JsonDec), SerialError) jd_field_name(JsonDec d, List(Str) fields) {
+    Parsed(Str, JsonDec) key = jd_str(d)?;
+    JsonDec d1 = jd_expect(key.rest, 58, "':'")?;
+    Int idx = name_index(fields, key.value);
+    return parsed(if (idx < 0) { UnknownField(key.value) } else { KnownField(idx) }, d1);
+}
+
+// ─── Variants ────────────────────────────────────────────────────────
+
+// A unit variant is a string; one with a payload is an object whose only
+// key names it. The name is read here; the payload is the caller's.
+Result(Parsed(Str, JsonDec), SerialError) jd_variant_name_at(JsonDec d) {
+    Result(Parsed(Int, JsonDec), SerialError) c = jd_peek_char(d, "an enum variant");
+    if (Err(e) = c) { return Err(e); }
+    if (Ok(got) = c) {
+        if (got.value == 34) { return jd_str(got.rest); }
+        if (got.value != 123) { return Err(invalid_type("an enum variant", jd_what(got.rest))); }
+        JsonDec d1 = jd_expect(got.rest, 123, "'{'")?;
+        JsonDec d2 = jd_set_top(jd_push(d1, JaObj(true)), JaObj(false));
+        Parsed(Str, JsonDec) key = jd_str(d2)?;
+        JsonDec d3 = jd_expect(key.rest, 58, "':'")?;
+        return parsed(key.value, JsonDec {.in = d3.in, .pos = d3.pos, .open = d3.open, .vmaps = d3.vmaps + 1, .payloads = d3.payloads + 1});
+    }
+    return Err(eof_error("an enum variant"));
+}
+
+Result(Parsed(Int, JsonDec), SerialError) jd_variant(JsonDec d, Str enum_name, List(Str) variants) {
+    Parsed(Str, JsonDec) n = jd_variant_name_at(d)?;
+    Int idx = name_index(variants, n.value);
+    if (idx < 0) { return Err(unknown_variant(n.value, variants)); }
+    return parsed(idx, n.rest);
+}
+
+Result(Parsed(VariantName, JsonDec), SerialError) jd_variant_name(JsonDec d) {
+    Parsed(Str, JsonDec) n = jd_variant_name_at(d)?;
+    return parsed(VariantName {.enum_name = "", .index = 0 - 1, .name = n.value, .has_payload = n.rest.payloads > 0}, n.rest);
+}
+
+Result(JsonDec, SerialError) jd_variant_payload(JsonDec d) {
+    if (d.payloads < 1) { return Err(custom_error("read_variant_payload without a payload")); }
+    return Ok(JsonDec {.in = d.in, .pos = d.pos, .open = d.open, .payloads = d.payloads - 1, .vmaps = d.vmaps});
+}
+
+Result(JsonDec, SerialError) jd_variant_unit(JsonDec d) {
+    if (d.payloads > 0) { return Err(custom_error("read_variant_unit on a variant with a payload")); }
+    return Ok(d);
+}
+
+// The object's closing brace.
+Result(JsonDec, SerialError) jd_variant_end(JsonDec d) {
+    if (d.payloads > 0) { return Err(custom_error("read_variant_end before the payload")); }
+    if (d.vmaps < 1) { return Ok(d); }
+    JsonDec d1 = jd_expect(d, 125, "'}'")?;
+    return Ok(JsonDec {.in = d1.in, .pos = d1.pos, .open = d1.open, .payloads = d1.payloads, .vmaps = d1.vmaps - 1});
+}
+
+// ─── Untyped reads ───────────────────────────────────────────────────
+
+Result(Parsed(Peek, JsonDec), SerialError) jd_peek(JsonDec d) {
+    Result(Parsed(Int, JsonDec), SerialError) c = jd_peek_char(d, "a value");
+    if (Err(e) = c) { return Err(e); }
+    if (Ok(got) = c) {
+        if (got.value == 110) { return parsed(PeekNone, got.rest); }
+        if (got.value == 116 || got.value == 102) { return parsed(PeekBool, got.rest); }
+        if (got.value == 34) { return parsed(PeekStr, got.rest); }
+        if (got.value == 91) { return parsed(PeekSeq, got.rest); }
+        if (got.value == 123) { return parsed(PeekMap, got.rest); }
+        if (got.value == 45 || (got.value >= 48 && got.value <= 57)) { return jd_peek_number(got.rest); }
+        return Err(syntax_error(f"unexpected {jd_name(got.value)}"));
+    }
+    return Err(eof_error("a value"));
+}
+
+// A number is an integer or a float: what follows the first digit decides.
+// JSON has one number type, so the shape is decided by what it fits: an
+// integer inside Int's range, a wider one as the 128-bit form, anything
+// with a fraction or an exponent as a float.
+Result(Parsed(Peek, JsonDec), SerialError) jd_peek_number(JsonDec d) {
+    NumTok tok = lex_number(d.in, d.pos)?;
+    return parsed(jd_number_peek(tok), d);
+}
+
+Peek jd_number_peek(NumTok tok) {
+    if (!tok.whole) { return PeekFloat; }
+    if (str_starts_with(tok.text, "-")) {
+        if (str_len(tok.text) > 19) { return PeekI128; }
+        return PeekInt;
+    }
+    if (str_len(tok.text) > 19) { return PeekU128; }
+    return PeekInt;
+}
+
+Result(JsonDec, SerialError) jd_skip(JsonDec d) { return jd_skip_at(d, "a value"); }
+
+Result(JsonDec, SerialError) jd_skip_at(JsonDec d, Str what) {
+    Result(Parsed(Int, JsonDec), SerialError) c = jd_peek_char(d, what);
+    if (Err(e) = c) { return Err(e); }
+    if (Ok(got) = c) {
+        JsonDec d1 = got.rest;
+        if (got.value == 34) { Parsed(Str, JsonDec) s = jd_str(d1)?; return Ok(s.rest); }
+        if (got.value == 110) { return jd_literal(d1, "null"); }
+        if (got.value == 116) { return jd_literal(d1, "true"); }
+        if (got.value == 102) { return jd_literal(d1, "false"); }
+        if (got.value == 91) { Parsed(Int, JsonDec) opened = jd_seq_begin(d1)?; return jd_skip_items(opened.rest, 4); }
+        if (got.value == 123) { Parsed(Int, JsonDec) open2 = jd_map_begin(d1)?; return jd_skip_items(open2.rest, 5); }
+        Parsed(NumTok, JsonDec) n = jd_number(d1)?;
+        return Ok(n.rest);
+    }
+    return Err(eof_error(what));
+}
+
+// The items of an opened container, each skipped.
+Result(JsonDec, SerialError) jd_skip_items(JsonDec d, Int kind) {
+    Parsed(Bool, JsonDec) more = if (kind == 4) { jd_seq_next(d)? } else { jd_map_next(d)? };
+    if (!more.value) { return Ok(more.rest); }
+    if (kind == 4) { return jd_skip_items(jd_skip_at(more.rest, "an array item")?, kind); }
+    JsonDec d1 = jd_skip_at(more.rest, "a map key")?;
+    Parsed(Bool, JsonDec) m = jd_map_next(d1)?;
+    if (!m.value) { return Err(syntax_error("a map key with no value")); }
+    JsonDec d2 = jd_map_value(m.rest)?;
+    return jd_skip_items(jd_skip_at(d2, "a map value")?, kind);
+}
+
+Result(JsonDec, SerialError) jd_end(JsonDec d) {
+    JsonDec d1 = jd_ws(d);
+    if (d1.pos < str_len(d1.in)) { return Err(trailing_input(f"at {d1.pos}: {str_slice(d1.in, d1.pos, d1.pos + 20)}")); }
+    return Ok(d1);
+}
+
+Bool jd_human(JsonDec d) { return true; }
+
+Decoder(JsonDec) = {
+    .read_unit = jd_unit, .read_bool = jd_bool, .read_int = jd_int, .read_uint = jd_uint,
+    .read_i128 = jd_i128, .read_u128 = jd_u128,
+    .read_float = jd_float, .read_str = jd_str, .read_bytes = jd_bytes, .read_option = jd_option,
+    .read_str_begin = jd_str_begin, .read_str_next = jd_str_next, .read_bytes_begin = jd_bytes_begin, .read_bytes_next = jd_bytes_next,
+    .read_seq_begin = jd_seq_begin, .read_seq_next = jd_seq_next, .read_map_begin = jd_map_begin,
+    .read_map_next = jd_map_next, .read_map_value = jd_map_value, .read_struct_begin = jd_struct_begin,
+    .read_field = jd_field, .read_variant = jd_variant, .read_variant_name = jd_variant_name,
+    .read_variant_unit = jd_variant_unit, .read_variant_payload = jd_variant_payload,
+    .read_variant_end = jd_variant_end, .read_skip = jd_skip, .read_peek = jd_peek, .read_end = jd_end,
+    .decodes_human_readable = jd_human
+};
+
+// ─── Entry points ────────────────────────────────────────────────────
+
+@needs(Decode(T, JsonDec))
+pub Result(T, SerialError) from_json(Str text) { return decode_value(json_decoder(text)); }
+
+@needs(Decode(T, JsonDec))
+pub Result(T, SerialError) from_json_value(Str text, T fallback) {
+    return decode_value(json_decoder(text));
+}

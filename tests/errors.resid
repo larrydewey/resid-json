@@ -1,0 +1,156 @@
+// errors.resid — what the format reports for text that is not JSON, and
+// for values it cannot spell.
+
+import "../src/json.resid";
+import "check.resid";
+
+type Point = { Int x; Int y; };
+
+type Shape = Circle(Int) | Dot;
+
+List(Str) point_fields() { return ["x", "y"]; }
+
+List(Str) shape_variants() { return ["Circle", "Dot"]; }
+
+@needs(Decoder(F))
+Result(Parsed(Point, F), SerialError) dec_point(F s) {
+    F s0 = read_struct_begin(s, "Point", point_fields())?;
+    return dec_point_fields(s0, None, None);
+}
+Decode(Point, F) = dec_point;
+
+@needs(Decoder(F))
+Result(Parsed(Point, F), SerialError) dec_point_fields(F s, Option(Int) x, Option(Int) y) {
+    Parsed(FieldKey, F) k = read_field(s, point_fields())?;
+    FieldKey key = k.value;
+    return match key {
+        KnownField(i) => dec_point_slot(k.rest, i, x, y),
+        UnknownField(name) => dec_point_fields(skip_unknown(k.rest, name, point_fields(), false)?, x, y),
+        EndOfFields => finish_point(k.rest, x, y)
+    };
+}
+
+@needs(Decoder(F))
+Result(Parsed(Point, F), SerialError) dec_point_slot(F s, Int i, Option(Int) x, Option(Int) y) {
+    if (i == 0) {
+        Parsed(Option(Int), F) v = read_slot(s, x, "x")?;
+        return dec_point_fields(v.rest, v.value, y);
+    }
+    Parsed(Option(Int), F) v = read_slot(s, y, "y")?;
+    return dec_point_fields(v.rest, x, v.value);
+}
+
+Result(Parsed(Point, F), SerialError) finish_point(F s, Option(Int) x, Option(Int) y) {
+    Int xv = require(x, "x")?;
+    Int yv = require(y, "y")?;
+    return parsed(Point {.x = xv, .y = yv}, s);
+}
+
+@needs(Decoder(F))
+Result(Parsed(Shape, F), SerialError) dec_shape(F s) {
+    Parsed(Int, F) v = read_variant(s, "Shape", shape_variants())?;
+    if (v.value == 0) {
+        Parsed(Int, F) r = read_newtype_payload(v.rest, "Circle")?;
+        return parsed(Circle(r.value), r.rest);
+    }
+    return read_unit_payload(v.rest, Dot);
+}
+Decode(Shape, F) = dec_shape;
+
+Str int_err(Str text) {
+    Result(Int, SerialError) r = from_json(text);
+    return err_of(r);
+}
+
+Str str_err(Str text) {
+    Result(Str, SerialError) r = from_json(text);
+    return err_of(r);
+}
+
+Str list_err(Str text) {
+    Result(List(Int), SerialError) r = from_json(text);
+    return err_of(r);
+}
+
+Str point_err(Str text) {
+    Result(Point, SerialError) r = from_json(text);
+    return err_of(r);
+}
+
+Str shape_err(Str text) {
+    Result(Shape, SerialError) r = from_json(text);
+    return err_of(r);
+}
+
+Str bytes_err(Str text) {
+    Result(ByteBuf, SerialError) r = from_json(text);
+    return err_of(r);
+}
+
+Int main() {
+    // Nothing at all.
+    check_text("e/empty", int_err(""), "unexpected end of input, expected a number");
+    check_text("e/whitespace only", list_err("  "), "unexpected end of input, expected '['");
+    check_text("e/garbage", int_err("wat"), "invalid type: expected an integer, found 'w'");
+    check_text("e/trailing comma", list_err("[1,]"), "invalid type: expected an integer, found ']' at [1]");
+    check_text("e/missing comma", list_err("[1 2]"), "expected ',', found '2'");
+    check_text("e/unclosed array", list_err("[1"), "unexpected end of input, expected ']' or a value");
+    check_text("e/unclosed object", point_err("{\"x\":1"), "unexpected end of input, expected '}' or a field name");
+
+    // Numbers.
+    check_text("n/leading zero", int_err("01"), "trailing input after the value: at 1: 1");
+    check_text("n/leading plus", int_err("+1"), "invalid type: expected an integer, found '+'");
+    check_text("n/dot alone", float_err("."), "invalid type: expected a float, found '.'");
+    check_text("n/trailing dot", float_err("1."), "expected a digit after the decimal point");
+    check_text("n/exponent alone", float_err("1e"), "expected a digit in the exponent");
+    check_text("n/empty exponent", float_err("1e+"), "expected a digit in the exponent");
+    check_text("n/space in number", int_err("1 2"), "trailing input after the value: at 2: 2");
+
+    // Strings.
+    check_text("s/unterminated", str_err("\"abc"), "unexpected end of input, expected a string");
+    check_text("s/bad escape", str_err("\"a\\qb\""), "unknown escape \\q in a string");
+    check_text("s/short escape", str_err("\"a\\\""), "unexpected end of input, expected a string");
+    check_text("s/bad hex", str_err("\"\\u00zz\""), "bad hex digit in a \\u escape in a string");
+    check_text("s/short \\u", str_err("\"\\u00\""), "bad hex digit in a \\u escape in a string");
+    check_text("s/lone high surrogate", str_err("\"\\ud83c\""), "a high surrogate with no low surrogate in a string");
+    check_text("s/lone low surrogate", str_err("\"\\udf0d\""), "a low surrogate with no high surrogate in a string");
+    check_text("s/unterminated string", str_err("\"a\\u00e9"), "unexpected end of input, expected a string");
+
+    // The wrong shape.
+    check_text("t/int as string", str_err("1"), "expected a string, found '1'");
+    check_text("t/string as int", int_err("\"1\""), "invalid type: expected an integer, found a string");
+    check_text("t/bool as int", int_err("true"), "invalid type: expected an integer, found a boolean");
+    check_text("t/null as int", int_err("null"), "invalid type: expected an integer, found null");
+    check_text("t/array as struct", point_err("[]"), "expected '{', found '['");
+    check_text("t/object as array", list_err("{}"), "expected '[', found '{'");
+    check_text("t/number field name", point_err("{1:2}"), "expected a string, found '1'");
+    check_text("t/missing colon", point_err("{\"x\" 1}"), "expected ':', found '1'");
+
+    // Struct fields and variants.
+    check_text("f/missing", point_err("{\"x\":1}"), "missing field `y`");
+    check_text("f/duplicate", point_err("{\"x\":1,\"x\":2,\"y\":3}"), "duplicate field `x`");
+    check_text("v/unknown", shape_err("\"Nope\""), "unknown variant `Nope`, expected `Circle` or `Dot`");
+    check_text("v/object with two keys", shape_err("{\"Circle\":1,\"Dot\":2}"), "expected '}', found ','");
+    check_text("v/number", shape_err("5"), "invalid type: expected an enum variant, found a number");
+
+    // Bytes are a hex string, so a bad one is an error.
+    check_text("b/odd length", bytes_err("\"abc\""), "an odd number of hex digits");
+    check_text("b/not hex", bytes_err("\"zz\""), "invalid hex digit in \"zz\"");
+
+    // Values JSON cannot spell.
+    Float zero = 0.0;
+    Float nan = zero / zero;
+    check_text("w/nan", text_of(to_json(nan)), "invalid value nan, expected a finite JSON number");
+    Float inf = 1.0 / zero;
+    check_text("w/infinity", text_of(to_json(inf)), "invalid value inf, expected a finite JSON number");
+    Result(Float, SerialError) big = from_json("1e999");
+    check_text("w/infinity back", float_text(big), "inf");
+
+    return 0;
+}
+
+// A float read, for the error message it gives.
+Str float_err(Str text) {
+    Result(Float, SerialError) r = from_json(text);
+    return err_of(r);
+}

@@ -1,0 +1,29 @@
+ok   struct
+ok   struct/negative
+ok   struct/text
+ok   enum/Circle
+ok   enum/Square
+ok   enum/Dot
+ok   enum/unit
+ok   enum/payload
+ok   nested
+ok   nested/no note
+ok   str/empty
+ok   str/ascii
+ok   str/utf8
+ok   str/emoji
+ok   i128/big
+ok   i128/small
+ok   u128/big
+ok   f32
+ok   dec
+ok   list
+ok   map
+ok   option/None
+ok   option/Some
+ok   result/Ok
+ok   result/Err
+ok   fixed str
+ok   fixed list
+ok   fixed bytes
+exit 0

@@ -1,0 +1,81 @@
+// text.resid — the lexical edges: escapes in both directions, the numbers
+// JSON allows, and the whitespace between tokens.
+
+import "../src/json.resid";
+import "check.resid";
+
+Str esc(Str s) { return json_escape(s); }
+
+// Escape, then read it back.
+Str trip(Str s) { return str_text(from_json("\"" + esc(s) + "\"")); }
+
+// The eight escapes side by side.
+Str simple_text() {
+    return "a" + str_from_code(10) + "b" + str_from_code(9) + "c" + str_from_code(13) + "d" + str_from_code(8) + "e" + str_from_code(12) + "f";
+}
+
+// One field out of an object, to show the whitespace inside it is ignored.
+Str obj_text(Result(Map(Str, Str), SerialError) r) {
+    if (Err(e) = r) { return error_text(e); }
+    if (Ok(m) = r) { return m.get("a") else { "?" }; }
+    return "unreachable";
+}
+
+Int main() {
+    // ─── Escapes written ──────────────────────────────────────────────
+    check_text("e/quote", esc("\""), "\\\"");
+    check_text("e/backslash", esc("\\"), "\\\\");
+    check_text("e/slash", esc("/"), "/");
+    check_text("e/tab", esc("\t"), "\\t");
+    check_text("e/newline", esc("\n"), "\\n");
+    check_text("e/return", esc("\r"), "\\r");
+    check_text("e/backspace", esc(str_from_code(8)), "\\b");
+    check_text("e/formfeed", esc(str_from_code(12)), "\\f");
+    check_text("e/other control", esc(str_from_code(1)), "\\u0001");
+    check_text("e/unicode stays", esc("héllo — ünïcode"), "héllo — ünïcode");
+    check_text("e/emoji stays", esc("🌍"), "🌍");
+
+    // ─── Escapes read ────────────────────────────────────────────────
+    check_text("r/simple", str_text(from_json("\"a\\nb\\tc\\rd\\be\\ff\"")), simple_text());
+    check_text("r/slash", str_text(from_json("\"a\\/b\"")), "a/b");
+    check_text("r/hex digits both cases", str_text(from_json("\"\\u00e9\\u00E8\"")), "éè");
+    check_text("r/astral", str_text(from_json("\"\\ud83c\\udf0d\"")), "🌍");
+    check_text("r/astral pair in text", str_text(from_json("\"a\\ud83c\\udf0db\"")), "a🌍b");
+    check_text("r/bmp", str_text(from_json("\"\\u4e2d\\u6587\"")), "中文");
+
+    // Round trips through the writer and the reader.
+    check_text("trip/plain", trip("hello"), "hello");
+    check_text("trip/quote", trip("say \"hi\""), "say \"hi\"");
+    check_text("trip/backslash", trip("a\\b"), "a\\b");
+    check_text("trip/newline", trip("one\ntwo"), "one\ntwo");
+    check_text("trip/control", trip("a" + str_from_code(1) + "b"), "a" + str_from_code(1) + "b");
+    check_text("trip/utf8", trip("héllo — ünïcode"), "héllo — ünïcode");
+    check_text("trip/emoji", trip("a🌍b"), "a🌍b");
+    check_text("trip/empty", trip(""), "");
+    check_text("trip/only quotes", trip("\"\""), "\"\"");
+
+    // ─── Numbers ─────────────────────────────────────────────────────
+    check_text("n/zero", float_text(from_json("0")), "0");
+    check_text("n/negative zero", float_text(from_json("-0")), "-0");
+    check_text("n/plus in exponent", float_text(from_json("1e+2")), "100");
+    check_text("n/minus in exponent", float_text(from_json("1e-2")), "0.01");
+    check_text("n/capital e", float_text(from_json("1E2")), "100");
+    check_text("n/fraction only", float_text(from_json("0.5")), "0.5");
+    check_text("n/trailing dot", float_text(from_json("1.0")), "1");
+    check_text("n/long fraction", float_text(from_json("3.141592653589793")), "3.141592653589793");
+    check_text("n/int as float", float_text(from_json("42")), "42");
+
+    // An integer token read as an integer.
+    check_text("n/as int", int_err(from_json("-17")), "ok");
+    check_text("n/big", int_err(from_json("9223372036854775807")), "ok");
+    check_text("n/too big for Int", int_err(from_json("9223372036854775808")), "invalid value 9223372036854775808, expected an integer");
+    check_text("n/exponent is not an int", int_err(from_json("1e2")), "invalid type: expected an integer, found a number with a fraction or an exponent");
+    check_text("n/fraction is not an int", int_err(from_json("1.5")), "invalid type: expected an integer, found a number with a fraction or an exponent");
+
+    // ─── Whitespace ──────────────────────────────────────────────────
+    check_text("w/around array", list_text(from_json(" [ 1 , 2 ] ")), "[1, 2]");
+    check_text("w/newlines", float_text(from_json("\n\t0\r\n")), "0");
+    check_text("w/around object", obj_text(from_json(" { \"a\" : \"b\" } ")), "b");
+
+    return 0;
+}

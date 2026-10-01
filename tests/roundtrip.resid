@@ -1,0 +1,421 @@
+// roundtrip.resid — values through the whole pipeline: encode, decode and
+// compare. The instances are written by hand here, so the test also shows
+// what a hand-written instance looks like.
+
+import "../src/json.resid";
+import "check.resid";
+
+// ─── The model ───────────────────────────────────────────────────────
+
+type Point = { Int x; Int y; };
+
+type Shape = Circle(Int) | Square(Int) | Dot;
+
+type Named = { Str name; Option(Str) note; List(Point) corners; };
+
+// ─── Instances ───────────────────────────────────────────────────────
+
+@needs(Encoder(F))
+Result(F, SerialError) enc_point(Point p, F s) {
+    F s1 = write_struct_begin(s, "Point", 2)?;
+    F s2 = write_named(s1, "x", p.x)?;
+    F s3 = write_named(s2, "y", p.y)?;
+    return write_struct_end(s3);
+}
+Encode(Point, F) = enc_point;
+
+List(Str) point_fields() { return ["x", "y"]; }
+
+@needs(Decoder(F))
+Result(Parsed(Point, F), SerialError) dec_point(F s) {
+    F s1 = read_struct_begin(s, "Point", point_fields())?;
+    return dec_point_fields(s1, None, None);
+}
+
+// Fields in any order, into slots; an unknown one is skipped.
+@needs(Decoder(F))
+Result(Parsed(Point, F), SerialError) dec_point_fields(F s, Option(Int) x, Option(Int) y) {
+    Parsed(FieldKey, F) k = read_field(s, point_fields())?;
+    FieldKey key = k.value;
+    return match key {
+        KnownField(i) => dec_point_slot(k.rest, i, x, y),
+        UnknownField(name) => dec_point_fields(skip_unknown(k.rest, name, point_fields(), false)?, x, y),
+        EndOfFields => finish_point(k.rest, x, y)
+    };
+}
+
+@needs(Decoder(F))
+Result(Parsed(Point, F), SerialError) dec_point_slot(F s, Int i, Option(Int) x, Option(Int) y) {
+    if (i == 0) {
+        Parsed(Option(Int), F) v = read_slot(s, x, "x")?;
+        return dec_point_fields(v.rest, v.value, y);
+    }
+    Parsed(Option(Int), F) v = read_slot(s, y, "y")?;
+    return dec_point_fields(v.rest, x, v.value);
+}
+
+Result(Parsed(Point, F), SerialError) finish_point(F s, Option(Int) x, Option(Int) y) {
+    Int xv = require(x, "x")?;
+    Int yv = require(y, "y")?;
+    return parsed(Point {.x = xv, .y = yv}, s);
+}
+Decode(Point, F) = dec_point;
+
+List(Str) shape_variants() { return ["Circle", "Square", "Dot"]; }
+
+@needs(Encoder(F))
+Result(F, SerialError) enc_shape(Shape sh, F s) {
+    return match sh {
+        Circle(r) => write_newtype_variant(s, "Shape", 0, "Circle", r),
+        Square(a) => write_newtype_variant(s, "Shape", 1, "Square", a),
+        Dot => write_unit_variant(s, "Shape", 2, "Dot")
+    };
+}
+Encode(Shape, F) = enc_shape;
+
+@needs(Decoder(F))
+Result(Parsed(Shape, F), SerialError) dec_shape(F s) {
+    Parsed(Int, F) v = read_variant(s, "Shape", shape_variants())?;
+    if (v.value == 0) {
+        Parsed(Int, F) r = read_newtype_payload(v.rest, "Circle")?;
+        return parsed(Circle(r.value), r.rest);
+    }
+    if (v.value == 1) {
+        Parsed(Int, F) a = read_newtype_payload(v.rest, "Square")?;
+        return parsed(Square(a.value), a.rest);
+    }
+    return read_unit_payload(v.rest, Dot);
+}
+Decode(Shape, F) = dec_shape;
+
+@needs(Encoder(F))
+Result(F, SerialError) enc_named(Named n, F s) {
+    F s1 = write_struct_begin(s, "Named", 3)?;
+    F s2 = write_named(s1, "name", n.name)?;
+    F s3 = write_named(s2, "note", n.note)?;
+    F s4 = write_named(s3, "corners", n.corners)?;
+    return write_struct_end(s4);
+}
+Encode(Named, F) = enc_named;
+
+List(Str) named_fields() { return ["name", "note", "corners"]; }
+
+@needs(Decoder(F), Decode(List(Point), F))
+Result(Parsed(Named, F), SerialError) dec_named(F s) {
+    F s1 = read_struct_begin(s, "Named", named_fields())?;
+    return dec_named_fields(s1, None, None, None);
+}
+
+@needs(Decoder(F), Decode(List(Point), F))
+Result(Parsed(Named, F), SerialError) dec_named_fields(F s, Option(Str) name, Option(Option(Str)) note, Option(List(Point)) corners) {
+    Parsed(FieldKey, F) k = read_field(s, named_fields())?;
+    FieldKey key = k.value;
+    return match key {
+        KnownField(i) => dec_named_slot(k.rest, i, name, note, corners),
+        UnknownField(n) => dec_named_fields(skip_unknown(k.rest, n, named_fields(), false)?, name, note, corners),
+        EndOfFields => finish_named(k.rest, name, note, corners)
+    };
+}
+
+@needs(Decoder(F), Decode(List(Point), F))
+Result(Parsed(Named, F), SerialError) dec_named_slot(F s, Int i, Option(Str) name, Option(Option(Str)) note, Option(List(Point)) corners) {
+    if (i == 0) {
+        Parsed(Option(Str), F) v = read_slot(s, name, "name")?;
+        return dec_named_fields(v.rest, v.value, note, corners);
+    }
+    if (i == 1) {
+        Parsed(Option(Option(Str)), F) v = read_slot(s, note, "note")?;
+        return dec_named_fields(v.rest, name, v.value, corners);
+    }
+    Parsed(Option(List(Point)), F) v = read_slot(s, corners, "corners")?;
+    return dec_named_fields(v.rest, name, note, v.value);
+}
+
+Result(Parsed(Named, F), SerialError) finish_named(F s, Option(Str) name, Option(Option(Str)) note, Option(List(Point)) corners) {
+    Str nv = require(name, "name")?;
+    Option(Str) ov = flatten_opt(note);
+    List(Point) cv = require(corners, "corners")?;
+    return parsed(Named {.name = nv, .note = ov, .corners = cv}, s);
+}
+Decode(Named, F) = dec_named;
+
+// ─── The checks ──────────────────────────────────────────────────────
+
+Str show_point(Point p) { return f"({p.x}, {p.y})"; }
+
+Str show_shape(Shape sh) {
+    return match sh {
+        Circle(r) => f"Circle({r})",
+        Square(a) => f"Square({a})",
+        Dot => "Dot"
+    };
+}
+
+Str show_option_str(Option(Str) o) {
+    Option(Str) x = o;
+    return match x { Some(v) => f"Some({v})", None => "None" };
+}
+
+Str show_named(Named n) {
+    return f"Named({n.name}, {show_option_str(n.note)}, {n.corners.len()} corners)";
+}
+
+Bool point_is(Str name, Point got, Int x, Int y) { return check_text(name, show_point(got), f"({x}, {y})"); }
+
+// Encode then decode, comparing the two shows.
+@needs(Encode(Shape, CborEnc), Decode(Shape, CborDec))
+Str trip_shape(Shape sh) {
+    Result(Str, SerialError) bytes = to_json(sh);
+    if (Err(e) = bytes) { return "encode: " + error_text(e); }
+    if (Ok(bs) = bytes) {
+        Result(Shape, SerialError) back = from_json(bs);
+        if (Err(e) = back) { return "decode: " + error_text(e); }
+        if (Ok(v) = back) { return show_shape(v); }
+        return "unreachable";
+    }
+    return "unreachable";
+}
+
+@needs(Encode(Point, CborEnc), Decode(Point, CborDec))
+Str trip_point(Point p) {
+    Result(Str, SerialError) bytes = to_json(p);
+    if (Err(e) = bytes) { return "encode: " + error_text(e); }
+    if (Ok(bs) = bytes) {
+        Result(Point, SerialError) back = from_json(bs);
+        if (Err(e) = back) { return "decode: " + error_text(e); }
+        if (Ok(v) = back) { return show_point(v); }
+        return "unreachable";
+    }
+    return "unreachable";
+}
+
+@needs(Encode(Named, CborEnc), Decode(Named, CborDec))
+Str trip_named(Named n) {
+    Result(Str, SerialError) bytes = to_json(n);
+    if (Err(e) = bytes) { return "encode: " + error_text(e); }
+    if (Ok(bs) = bytes) {
+        Result(Named, SerialError) back = from_json(bs);
+        if (Err(e) = back) { return "decode: " + error_text(e); }
+        if (Ok(v) = back) { return show_named(v); }
+        return "unreachable";
+    }
+    return "unreachable";
+}
+
+Str trip_str(Str want) {
+    Result(Str, SerialError) bytes = to_json(want);
+    if (Err(e) = bytes) { return "encode: " + error_text(e); }
+    if (Ok(bs) = bytes) {
+        Result(Str, SerialError) back = from_json(bs);
+        if (Err(e) = back) { return "decode: " + error_text(e); }
+        if (Ok(v) = back) { return v; }
+        return "unreachable";
+    }
+    return "unreachable";
+}
+
+Str trip_i128(Int(128) want) {
+    Result(Str, SerialError) bytes = to_json(want);
+    if (Err(e) = bytes) { return "encode: " + error_text(e); }
+    if (Ok(bs) = bytes) {
+        Result(Int(128), SerialError) back = from_json(bs);
+        if (Err(e) = back) { return "decode: " + error_text(e); }
+        if (Ok(v) = back) { return f"{v}"; }
+        return "unreachable";
+    }
+    return "unreachable";
+}
+
+Str trip_u128(UInt(128) want) {
+    Result(Str, SerialError) bytes = to_json(want);
+    if (Err(e) = bytes) { return "encode: " + error_text(e); }
+    if (Ok(bs) = bytes) {
+        Result(UInt(128), SerialError) back = from_json(bs);
+        if (Err(e) = back) { return "decode: " + error_text(e); }
+        if (Ok(v) = back) { return f"{v}"; }
+        return "unreachable";
+    }
+    return "unreachable";
+}
+
+Str trip_fixed_str(Str(N) want) {
+    Result(Str, SerialError) bytes = to_json(want);
+    if (Err(e) = bytes) { return "encode: " + error_text(e); }
+    if (Ok(bs) = bytes) {
+        Result(Str(N), SerialError) back = from_json(bs);
+        if (Err(e) = back) { return "decode: " + error_text(e); }
+        if (Ok(v) = back) { return f"{v}"; }
+        return "unreachable";
+    }
+    return "unreachable";
+}
+
+Str trip_fixed_list(List(Int, 3) want) {
+    Result(Str, SerialError) bytes = to_json(want);
+    if (Err(e) = bytes) { return "encode: " + error_text(e); }
+    if (Ok(bs) = bytes) {
+        Result(List(Int, 3), SerialError) back = from_json(bs);
+        if (Err(e) = back) { return "decode: " + error_text(e); }
+        if (Ok(v) = back) { return f"{v}"; }
+        return "unreachable";
+    }
+    return "unreachable";
+}
+
+Str trip_map(Map(Str, Int) want) {
+    Result(Str, SerialError) bytes = to_json(want);
+    if (Err(e) = bytes) { return "encode: " + error_text(e); }
+    if (Ok(bs) = bytes) {
+        Result(Map(Str, Int), SerialError) back = from_json(bs);
+        if (Err(e) = back) { return "decode: " + error_text(e); }
+        if (Ok(m) = back) { return str_join(map_parts(m, 0, sort(m.keys()), []), ","); }
+    }
+    return "unreachable";
+}
+
+List(Str) map_parts(Map(Str, Int) m, Int i, List(Str) keys, List(Str) acc) {
+    if (i >= keys.len()) { return acc; }
+    Int v = m.get(keys[i]) else { 0 };
+    return map_parts(m, i + 1, keys, acc.concat([f"{keys[i]}={v}"]));
+}
+
+Str trip_fixed_bytes(Bytes(4) want) {
+    Result(Str, SerialError) bytes = to_json(want);
+    if (Err(e) = bytes) { return "encode: " + error_text(e); }
+    if (Ok(bs) = bytes) {
+        Result(Bytes(4), SerialError) back = from_json(bs);
+        if (Err(e) = back) { return "decode: " + error_text(e); }
+        if (Ok(v) = back) { return f"{v.len()}"; }
+        return "unreachable";
+    }
+    return "unreachable";
+}
+
+Str trip_dec(Dec(6) want) {
+    Result(Str, SerialError) bytes = to_json(want);
+    if (Err(e) = bytes) { return "encode: " + error_text(e); }
+    if (Ok(bs) = bytes) {
+        Result(Dec(6), SerialError) back = from_json(bs);
+        if (Err(e) = back) { return "decode: " + error_text(e); }
+        if (Ok(v) = back) { return f"{v}"; }
+        return "unreachable";
+    }
+    return "unreachable";
+}
+
+Str trip_set(Set(Int) want) {
+    Result(Str, SerialError) bytes = to_json(want);
+    if (Err(e) = bytes) { return "encode: " + error_text(e); }
+    if (Ok(bs) = bytes) {
+        // A set writes its items sorted; read them back as a list.
+        Result(List(Int), SerialError) back = from_json(bs);
+        if (Err(e) = back) { return "decode: " + error_text(e); }
+        if (Ok(v) = back) { return f"{v}"; }
+        return "unreachable";
+    }
+    return "unreachable";
+}
+
+@needs(Decode(Point, CborDec))
+Str trip_option(Option(Point) want) {
+    Result(Str, SerialError) bytes = to_json(want);
+    if (Err(e) = bytes) { return "encode: " + error_text(e); }
+    if (Ok(bs) = bytes) {
+        Result(Option(Point), SerialError) back = from_json(bs);
+        if (Err(e) = back) { return "decode: " + error_text(e); }
+        if (Ok(bp) = back) { return match bp { Some(p) => f"Some({show_point(p)})", None => "None" }; }
+        return "unreachable";
+    }
+    return "unreachable";
+}
+
+Str trip_result(Result(Int, Str) want) {
+    Result(Str, SerialError) bytes = to_json(want);
+    if (Err(e) = bytes) { return "encode: " + error_text(e); }
+    if (Ok(bs) = bytes) {
+        Result(Result(Int, Str), SerialError) back = from_json(bs);
+        if (Err(e) = back) { return "decode: " + error_text(e); }
+        if (Ok(rb) = back) { return match rb { Ok(a) => f"Ok({a})", Err(m) => f"Err({m})" }; }
+        return "unreachable";
+    }
+    return "unreachable";
+}
+
+Str trip_float32(Float(32) want) {
+    Result(Str, SerialError) bytes = to_json(want);
+    if (Err(e) = bytes) { return "encode: " + error_text(e); }
+    if (Ok(bs) = bytes) {
+        Result(Float(32), SerialError) back = from_json(bs);
+        if (Err(e) = back) { return "decode: " + error_text(e); }
+        if (Ok(v) = back) { return f"{v}"; }
+        return "unreachable";
+    }
+    return "unreachable";
+}
+
+Int main() {
+    // Structs.
+    check_text("struct", trip_point(Point {.x = 1, .y = 2}), "(1, 2)");
+    check_text("struct/negative", trip_point(Point {.x = 0 - 5, .y = 1000000}), "(-5, 1000000)");
+    check_text("struct/text", text_of(to_json(Point {.x = 1, .y = 2})), "{\"x\":1,\"y\":2}");
+
+    // Enums: unit and payload variants.
+    check_text("enum/Circle", trip_shape(Circle(3)), "Circle(3)");
+    check_text("enum/Square", trip_shape(Square(0 - 2)), "Square(-2)");
+    check_text("enum/Dot", trip_shape(Dot), "Dot");
+    check_text("enum/unit", text_of(to_json(Dot)), "\"Dot\"");
+    check_text("enum/payload", text_of(to_json(Circle(3))), "{\"Circle\":3}");
+
+    // Nested: a record with an option, a list of records.
+    List(Point) corners = [Point {.x = 0, .y = 0}, Point {.x = 3, .y = 4}];
+    Option(Str) note = Some("hi");
+    check_text("nested", trip_named(Named {.name = "n", .note = note, .corners = corners}), "Named(n, Some(hi), 2 corners)");
+    Option(Str) nonote = None;
+    check_text("nested/no note", trip_named(Named {.name = "n", .note = nonote, .corners = corners}), "Named(n, None, 2 corners)");
+
+    // Strings, fixed-capacity strings and the numeric widths.
+    check_text("str/empty", trip_str(""), "");
+    check_text("str/ascii", trip_str("hello"), "hello");
+    check_text("str/utf8", trip_str("héllo — ünïcode"), "héllo — ünïcode");
+    check_text("str/emoji", trip_str("a🌍b"), "a🌍b");
+    check_text("i128/big", trip_i128(i128(170141183460469231731687303715884105727)), "170141183460469231731687303715884105727");
+    check_text("i128/small", trip_i128(i128(0) - i128(1000)), "-1000");
+    check_text("u128/big", trip_u128(u128(340282366920938463463374607431768211455)), "340282366920938463463374607431768211455");
+    check_text("f32", trip_float32(f32(1.5)), "1.5");
+    Dec(6) price = 19.9999m;
+    check_text("dec", trip_dec(price), "19.9999");
+
+    // Sequences, maps, sets, options, results.
+    List(Int) nums = [3, 1, 2];
+    check_text("list", trip_set(set_from_list(nums)), "[1, 2, 3]");
+    Map(Str, Int) m = {};
+    Map(Str, Int) m2 = m.insert("b", 2);
+    Map(Str, Int) m3 = m2.insert("a", 1);
+    check_text("map", trip_map(m3), "a=1,b=2");
+    Option(Point) none = None;
+    check_text("option/None", trip_option(none), "None");
+    Option(Point) some = Some(Point {.x = 7, .y = 8});
+    check_text("option/Some", trip_option(some), "Some((7, 8))");
+    check_text("result/Ok", trip_result(Ok(5)), "Ok(5)");
+    check_text("result/Err", trip_result(Err("bad")), "Err(bad)");
+
+    // Fixed capacity: read back through the streaming verbs.
+    Str(8) small = "abc";
+    check_text("fixed str", trip_fixed_str(small), "abc");
+    List(Int, 3) triple = [1, 2, 3];
+    check_text("fixed list", trip_fixed_list(triple), "[1, 2, 3]");
+    Bytes(4) quad = b"abc";
+    check_text("fixed bytes", trip_fixed_bytes(quad), "4");
+
+    return 0;
+}
+
+Set(Int) set_from_list(List(Int) xs) {
+    Set(Int) empty = {};
+    return set_build(xs, 0, empty);
+}
+
+Set(Int) set_build(List(Int) xs, Int i, Set(Int) acc) {
+    if (i >= xs.len()) { return acc; }
+    return set_build(xs, i + 1, acc.insert(xs[i]));
+}

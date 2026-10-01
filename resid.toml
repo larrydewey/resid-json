@@ -1,0 +1,13 @@
+[package]
+name = "resid-json"
+version = "0.1.0"
+
+# The package is pure: no capabilities. The tests only print.
+[capabilities]
+grant = []
+
+# The framework this is a format for. src/json.resid imports
+# ../../resid-serial/src/serial.resid, so a checkout beside it works as is;
+# vendored or packed, this entry is what the manifest tool resolves.
+[dependencies.resid-serial]
+path = "../resid-serial"

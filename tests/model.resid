@@ -1,0 +1,27 @@
+// model.resid — the types the derive test generates instances for. The
+// generated file model_serial.resid is written beside it by resid-derive,
+// which run.sh builds from ../resid-serial/tools.
+
+//@ serial(rename_all = "camelCase", deny_unknown_fields)
+type Config = {
+    Str host_name;                  //@ rename = "hostname", alias = "server"
+    Int login_count;                //@ default
+    Option(Str) email;              //@ skip_encoding_if = "is_none_email"
+    Str secret;                     //@ skip, default = "no_secret"
+};
+
+pub Bool is_none_email(Option(Str) s) { return match s { Some(x) => false, None => true }; }
+
+pub Str no_secret() { return "hidden"; }
+
+//@ serial(tag = "kind", rename_all = "snake_case")
+type Event = Started(Config) | Stopped;
+
+//@ serial(transparent)
+type Meters = { Float value; };
+
+//@ serial(untagged)
+type Loose = Num(Int) | Word(Str) | Nothing;
+
+// Not annotated: left alone.
+type Plain = { Int n; };

@@ -1,0 +1,66 @@
+// check.resid — the assertions the tests use. Each prints one line, so a
+// golden file of all-ok lines pins the whole suite.
+
+import "../src/json.resid";
+
+pub Bool check(Str name, Bool ok) {
+    println(if (ok) { "ok   " + name } else { "FAIL " + name });
+    return ok;
+}
+
+pub Bool check_text(Str name, Str got, Str want) {
+    if (got == want) {
+        println("ok   " + name);
+        return true;
+    }
+    println("FAIL " + name + "\n       want " + want + "\n       got  " + got);
+    return false;
+}
+
+// What a failure says, or "ok".
+pub Str err_of(Result(X, SerialError) r) {
+    if (Err(e) = r) { return error_text(e); }
+    return "ok";
+}
+
+// What an encode produced, or the error it failed with.
+pub Str text_of(Result(Str, SerialError) r) {
+    if (Err(e) = r) { return error_text(e); }
+    if (Ok(s) = r) { return s; }
+    return "unreachable";
+}
+
+pub Str big_text(Result(Int(128), SerialError) r) {
+    if (Err(e) = r) { return error_text(e); }
+    if (Ok(v) = r) { return f"{v}"; }
+    return "unreachable";
+}
+
+pub Str ubig_text(Result(UInt(128), SerialError) r) {
+    if (Err(e) = r) { return error_text(e); }
+    if (Ok(v) = r) { return f"{v}"; }
+    return "unreachable";
+}
+
+pub Str float_text(Result(Float, SerialError) r) {
+    if (Err(e) = r) { return error_text(e); }
+    if (Ok(v) = r) { return f"{v}"; }
+    return "unreachable";
+}
+
+pub Str str_text(Result(Str, SerialError) r) {
+    if (Err(e) = r) { return error_text(e); }
+    if (Ok(v) = r) { return v; }
+    return "unreachable";
+}
+
+pub Str list_text(Result(List(Int), SerialError) r) {
+    if (Err(e) = r) { return error_text(e); }
+    if (Ok(v) = r) { return f"{v}"; }
+    return "unreachable";
+}
+
+pub Str int_err(Result(Int, SerialError) r) {
+    if (Err(e) = r) { return error_text(e); }
+    return "ok";
+}

@@ -1,0 +1,252 @@
+// lex.resid — the two lexical jobs of JSON: numbers in text, and strings
+// with their escapes. Both directions, no format state.
+
+import "../../resid-serial/src/serial.resid";
+
+// ─── Numbers ─────────────────────────────────────────────────────────
+
+// A JSON number as a slice of the input: the token itself, whether it is
+// an integer (no fraction, no exponent), and where it ends.
+type NumTok = { Str text; Int end; Bool whole; };
+
+pub Result(NumTok, SerialError) lex_number(Str in, Int i) {
+    Int n = str_len(in);
+    Int start = i;
+    Int i1 = if (i < n && str_char_at(in, i) == 45) { lex_number_sign(in, i, n) } else { i };
+    Int digits = lex_int(in, i1, n);
+    if (digits == 0) { return Err(syntax_error(f"expected a digit at {i}")); }
+    Int j = i1 + digits;
+    Int frac = lex_frac_part(in, j, n);
+    if (frac == 0 - 1) { return Err(syntax_error("expected a digit after the decimal point")); }
+    Int k = if (frac > j) { frac } else { j };
+    Int exp = lex_exp_part(in, k, n);
+    if (exp == 0 - 1) { return Err(syntax_error("expected a digit in the exponent")); }
+    Int end = if (exp > k) { exp } else { k };
+    Bool whole = (frac <= j) && (exp <= k);
+    return Ok(NumTok {.text = str_slice(in, start, end), .end = end, .whole = whole});
+}
+
+pub Int lex_number_sign(Str in, Int i, Int n) {
+    if (i >= n) { return i; }
+    if (lex_is_digit(str_char_at(in, i))) { return i; }
+    return i + 1;
+}
+
+pub Int lex_int(Str in, Int i, Int n) {
+    if (i < n && str_char_at(in, i) == 48) { return 1; }
+    return lex_digits(in, i, n);
+}
+
+// The digits after a decimal point, and where they stop; the input index
+// back when there was no point, -1 when the point had no digit.
+pub Int lex_frac_part(Str in, Int i, Int n) {
+    if (i >= n || str_char_at(in, i) != 46) { return i; }
+    Int digits = lex_digits(in, i + 1, n);
+    if (digits == 0) { return 0 - 1; }
+    return i + 1 + digits;
+}
+
+// The exponent and where it stop, or 0 when there was none.
+pub Int lex_exp_part(Str in, Int i, Int n) {
+    if (i >= n) { return 0; }
+    Int c = str_char_at(in, i);
+    if (c != 101 && c != 69) { return 0; }
+    Int j0 = i + 1;
+    Int j = if (j0 < n && (str_char_at(in, j0) == 43 || str_char_at(in, j0) == 45)) { j0 + 1 } else { j0 };
+    Int digits = lex_digits(in, j, n);
+    if (digits == 0) { return 0 - 1; }
+    return j + digits;
+}
+
+pub Int lex_digits(Str in, Int i, Int n) {
+    if (i >= n) { return 0; }
+    Int c = str_char_at(in, i);
+    if (!lex_is_digit(c)) { return 0; }
+    return lex_digits(in, i + 1, n) + 1;
+}
+
+Bool lex_is_digit(Int c) { return c >= 48 && c <= 57; }
+
+// The integer a decimal token stands for, checked against `bits` the way
+// the data model checks a number back into a width.
+pub Result(Int, SerialError) json_int(Str t, Str what) {
+    Int i0 = 0;
+    Bool neg = i0 < str_len(t) && str_char_at(t, i0) == 45;
+    Int i = if (neg) { i0 + 1 } else { i0 };
+    Result(Int, SerialError) digits = json_digits(t, i, what);
+    if (Err(e) = digits) { return Err(e); }
+    if (Ok(mag) = digits) { return Ok(if (neg) { 0 - mag } else { mag }); }
+    return Err(syntax_error(f"{t} is not an integer"));
+}
+
+pub Result(Int, SerialError) json_digits(Str t, Int i, Str what) {
+    return json_digits_at(t, i, 0, what);
+}
+
+// Accumulated a digit at a time, so an over-long token is an error rather
+// than a wrap.
+pub Result(Int, SerialError) json_digits_at(Str t, Int i, Int acc, Str what) {
+    if (i >= str_len(t)) { return Ok(acc); }
+    Int c = str_char_at(t, i);
+    if (!lex_is_digit(c)) { return Err(syntax_error(f"{t} is not {what}")); }
+    if (acc > (9223372036854775807 - (c - 48)) / 10) { return Err(invalid_value(t, what)); }
+    return json_digits_at(t, i + 1, acc * 10 + (c - 48), what);
+}
+
+pub Int(128) i128_digits(Str t, Int i, Int(128) acc) {
+    if (i >= str_len(t)) { return acc; }
+    return i128_digits(t, i + 1, acc * i128(10) + (Int(128))(str_char_at(t, i) - 48));
+}
+
+pub UInt(128) u128_digits(Str t, Int i, UInt(128) acc) {
+    if (i >= str_len(t)) { return acc; }
+    return u128_digits(t, i + 1, acc * u128(10) + (UInt(128))(str_char_at(t, i) - 48));
+}
+
+// ─── Strings ─────────────────────────────────────────────────────────
+
+// A string body as JSON text, with the escapes RFC 8259 asks for: the two
+// that must be escaped, the five that have short forms, and the other
+// control characters as \u00XX. Everything else, including every non-ASCII
+// code point, is written as itself.
+pub Str json_escape(Str s) { return json_escape_at(s, 0, StrBuf()); }
+
+// The escaped text is gathered in one builder: a fresh string per code
+// point would copy what has been written so far each time.
+pub Str json_escape_at(Str s, Int i, StrBuf b) {
+    if (i >= str_len(s)) { return b.finish(); }
+    Int c = str_char_at(s, i);
+    if (c == 34) { return json_escape_at(s, i + 1, b.push("\\\"")); }
+    if (c == 92) { return json_escape_at(s, i + 1, b.push("\\\\")); }
+    if (c == 8) { return json_escape_at(s, i + 1, b.push("\\b")); }
+    if (c == 9) { return json_escape_at(s, i + 1, b.push("\\t")); }
+    if (c == 10) { return json_escape_at(s, i + 1, b.push("\\n")); }
+    if (c == 12) { return json_escape_at(s, i + 1, b.push("\\f")); }
+    if (c == 13) { return json_escape_at(s, i + 1, b.push("\\r")); }
+    if (c < 32) { return json_escape_at(s, i + 1, b.push(json_hex4(c))); }
+    return json_escape_at(s, i + 1, b.push_char(c));
+}
+
+// \u00XX, lower-case hex.
+pub Str json_hex4(Int c) {
+    Str digits = "0123456789abcdef";
+    Int hi = c >> 4;
+    Int lo = c & 15;
+    return "\\u00" + str_slice(digits, hi, hi + 1) + str_slice(digits, lo, lo + 1);
+}
+
+// One code point of a string body read at `i`, its escapes included, and
+// where the next one starts.
+type JsonCp = { Int cp; Int next; };
+
+pub Result(JsonCp, SerialError) json_cp_at(Str in, Int i, Str what) {
+    Int c = str_char_at(in, i);
+    if (c != 92) { return Ok(JsonCp {.cp = c, .next = i + 1}); }
+    return json_esc_at(in, i, what);
+}
+
+pub Result(JsonCp, SerialError) json_esc_at(Str in, Int i, Str what) {
+    Int n = str_len(in);
+    if (i + 1 >= n) { return Err(syntax_error(f"unfinished escape in {what}")); }
+    Int e = str_char_at(in, i + 1);
+    if (e == 34) { return Ok(JsonCp {.cp = 34, .next = i + 2}); }
+    if (e == 92) { return Ok(JsonCp {.cp = 92, .next = i + 2}); }
+    if (e == 47) { return Ok(JsonCp {.cp = 47, .next = i + 2}); }
+    if (e == 98) { return Ok(JsonCp {.cp = 8, .next = i + 2}); }
+    if (e == 102) { return Ok(JsonCp {.cp = 12, .next = i + 2}); }
+    if (e == 110) { return Ok(JsonCp {.cp = 10, .next = i + 2}); }
+    if (e == 114) { return Ok(JsonCp {.cp = 13, .next = i + 2}); }
+    if (e == 116) { return Ok(JsonCp {.cp = 9, .next = i + 2}); }
+    if (e != 117) { return Err(syntax_error(f"unknown escape \\{str_from_code(e)} in {what}")); }
+    return json_u_escape(in, i + 2, what);
+}
+
+pub // \uXXXX: four hex digits, and a high surrogate that a low one follows.
+Result(JsonCp, SerialError) json_u_escape(Str in, Int i, Str what) { return json_u_at(in, i, 0, 0, what); }
+
+Result(JsonCp, SerialError) json_u_at(Str in, Int i, Int seen, Int acc, Str what) {
+    if (seen >= 4) {
+        if (acc >= 0xD800 && acc <= 0xDBFF) { return json_surrogate(in, i, acc, what); }
+        if (acc >= 0xDC00 && acc <= 0xDFFF) { return Err(syntax_error(f"a low surrogate with no high surrogate in {what}")); }
+        return Ok(JsonCp {.cp = acc, .next = i});
+    }
+    if (i >= str_len(in)) { return Err(syntax_error(f"unfinished \\u escape in {what}")); }
+    Result(Int, SerialError) nib = json_hex_digit(in, i, what);
+    if (Err(e) = nib) { return Err(e); }
+    if (Ok(d) = nib) { return json_u_at(in, i + 1, seen + 1, acc * 16 + d, what); }
+    return Err(syntax_error(f"bad \\u escape in {what}"));
+}
+
+// A high surrogate is half of one code point: the low one follows.
+pub Result(JsonCp, SerialError) json_surrogate(Str in, Int i, Int hi, Str what) {
+    if (i + 1 >= str_len(in) || str_char_at(in, i) != 92 || str_char_at(in, i + 1) != 117) {
+        return Err(syntax_error(f"a high surrogate with no low surrogate in {what}"));
+    }
+    Result(Int, SerialError) lo = json_hex4_value(in, i + 2, 0, what);
+    if (Err(e) = lo) { return Err(e); }
+    if (Ok(low) = lo) {
+        if (low < 0xDC00 || low > 0xDFFF) { return Err(syntax_error(f"a high surrogate with no low surrogate in {what}")); }
+        Int cp = 0x10000 + ((hi - 0xD800) << 10) + (low - 0xDC00);
+        return Ok(JsonCp {.cp = cp, .next = i + 6});
+    }
+    return Err(syntax_error(f"bad \\u escape in {what}"));
+}
+
+Result(Int, SerialError) json_hex4_value(Str in, Int i, Int acc, Str what) { return json_hex_value(in, i, 0, acc, what); }
+
+pub Result(Int, SerialError) json_hex_value(Str in, Int i, Int seen, Int acc, Str what) {
+    if (seen >= 4) { return Ok(acc); }
+    if (i >= str_len(in)) { return Err(syntax_error(f"unfinished \\u escape in {what}")); }
+    Result(Int, SerialError) nib = json_hex_digit(in, i, what);
+    if (Err(e) = nib) { return Err(e); }
+    if (Ok(d) = nib) { return json_hex_value(in, i + 1, seen + 1, acc * 16 + d, what); }
+    return Err(syntax_error(f"bad \\u escape in {what}"));
+}
+
+pub Result(Int, SerialError) json_hex_digit(Str in, Int i, Str what) {
+    if (i >= str_len(in)) { return Err(syntax_error(f"unfinished \\u escape in {what}")); }
+    Int c = str_char_at(in, i);
+    if (c >= 48 && c <= 57) { return Ok(c - 48); }
+    if (c >= 97 && c <= 102) { return Ok(c - 87); }
+    if (c >= 65 && c <= 70) { return Ok(c - 55); }
+    return Err(syntax_error(f"bad hex digit in a \\u escape in {what}"));
+}
+
+// ─── Hex, for the byte strings JSON has no type for ──────────────────
+
+pub Str json_hex(List(Int) bs) { return json_hex_at(bs, 0, StrBuf()); }
+
+pub Str json_hex_at(List(Int) bs, Int i, StrBuf b) {
+    if (i >= bs.len()) { return b.finish(); }
+    Str digits = "0123456789abcdef";
+    Int hi = bs[i] >> 4;
+    Int lo = bs[i] & 15;
+    StrBuf more = b.push_char(str_char_at(digits, hi)).push_char(str_char_at(digits, lo));
+    return json_hex_at(bs, i + 1, more);
+}
+
+pub Result(List(Int), SerialError) json_unhex(Str t) { return json_unhex_at(t, 0, ListBuf()); }
+
+pub Result(List(Int), SerialError) json_unhex_at(Str t, Int i, ListBuf(Int) b) {
+    if (i >= str_len(t)) { return Ok(b.finish()); }
+    if (i + 1 >= str_len(t)) { List(Int) dropped = b.finish(); return Err(syntax_error("an odd number of hex digits")); }
+    Result(Int, SerialError) hi = json_hex_nibble(t, i);
+    if (Err(e) = hi) { List(Int) dropped2 = b.finish(); return Err(e); }
+    Result(Int, SerialError) lo = json_hex_nibble(t, i + 1);
+    if (Err(e) = lo) { List(Int) dropped3 = b.finish(); return Err(e); }
+    if (Ok(a) = hi) {
+        if (Ok(c) = lo) { return json_unhex_at(t, i + 2, b.push(a * 16 + c)); }
+        List(Int) dropped4 = b.finish();
+        return Err(eof_error("bytes"));
+    }
+    List(Int) dropped5 = b.finish();
+    return Err(eof_error("bytes"));
+}
+
+pub Result(Int, SerialError) json_hex_nibble(Str t, Int i) {
+    Int c = str_char_at(t, i);
+    if (c >= 48 && c <= 57) { return Ok(c - 48); }
+    if (c >= 97 && c <= 102) { return Ok(c - 87); }
+    if (c >= 65 && c <= 70) { return Ok(c - 55); }
+    return Err(syntax_error(f"invalid hex digit in \"{t}\""));
+}

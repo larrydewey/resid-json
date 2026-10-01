@@ -1,0 +1,35 @@
+ok   peek/int
+ok   peek/negative
+ok   peek/bool
+ok   peek/null
+ok   peek/float
+ok   peek/string
+ok   peek/bytes
+ok   peek/array
+ok   peek/map
+ok   peek/option
+ok   peek/big int
+ok   peek/variant text
+ok   peek/variant map
+ok   again/array
+ok   again/map
+ok   again/indefinite becomes definite
+ok   again/indefinite string
+ok   again/variant
+ok   again/half float
+ok   again/bignum
+ok   value/bool
+ok   value/int
+ok   value/uint
+ok   value/i128
+ok   value/u128
+ok   value/float
+ok   value/str
+ok   value/bytes
+ok   value/none
+ok   value/seq
+ok   value/map
+ok   value/struct
+ok   value/variant
+ok   value/nested
+exit 0

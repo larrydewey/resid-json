@@ -1,0 +1,150 @@
+// vectors.resid — the shapes RFC 8259 shows, written and read back.
+
+import "../src/json.resid";
+import "check.resid";
+
+type Point = { Int x; Int y; };
+
+type Shape = Circle(Int) | Dot;
+
+List(Str) point_fields() { return ["x", "y"]; }
+
+List(Str) shape_variants() { return ["Circle", "Dot"]; }
+
+@needs(Encoder(F))
+Result(F, SerialError) enc_point(Point p, F s) {
+    F s0 = write_struct_begin(s, "Point", 2)?;
+    F s1 = write_named(s0, "x", p.x)?;
+    F s2 = write_named(s1, "y", p.y)?;
+    return write_struct_end(s2);
+}
+Encode(Point, F) = enc_point;
+
+@needs(Decoder(F))
+Result(Parsed(Point, F), SerialError) dec_point(F s) {
+    F s0 = read_struct_begin(s, "Point", point_fields())?;
+    return dec_point_fields(s0, None, None);
+}
+Decode(Point, F) = dec_point;
+
+@needs(Decoder(F))
+Result(Parsed(Point, F), SerialError) dec_point_fields(F s, Option(Int) x, Option(Int) y) {
+    Parsed(FieldKey, F) k = read_field(s, point_fields())?;
+    FieldKey key = k.value;
+    return match key {
+        KnownField(i) => dec_point_slot(k.rest, i, x, y),
+        UnknownField(name) => dec_point_fields(skip_unknown(k.rest, name, point_fields(), false)?, x, y),
+        EndOfFields => finish_point(k.rest, x, y)
+    };
+}
+
+@needs(Decoder(F))
+Result(Parsed(Point, F), SerialError) dec_point_slot(F s, Int i, Option(Int) x, Option(Int) y) {
+    if (i == 0) {
+        Parsed(Option(Int), F) v = read_slot(s, x, "x")?;
+        return dec_point_fields(v.rest, v.value, y);
+    }
+    Parsed(Option(Int), F) v = read_slot(s, y, "y")?;
+    return dec_point_fields(v.rest, x, v.value);
+}
+
+Result(Parsed(Point, F), SerialError) finish_point(F s, Option(Int) x, Option(Int) y) {
+    Int xv = require(x, "x")?;
+    Int yv = require(y, "y")?;
+    return parsed(Point {.x = xv, .y = yv}, s);
+}
+
+@needs(Encoder(F))
+Result(F, SerialError) enc_shape(Shape sh, F s) {
+    return match sh {
+        Circle(r) => write_newtype_variant(s, "Shape", 0, "Circle", r),
+        Dot => write_unit_variant(s, "Shape", 1, "Dot")
+    };
+}
+Encode(Shape, F) = enc_shape;
+
+@needs(Decoder(F))
+Result(Parsed(Shape, F), SerialError) dec_shape(F s) {
+    Parsed(Int, F) v = read_variant(s, "Shape", shape_variants())?;
+    if (v.value == 0) {
+        Parsed(Int, F) r = read_newtype_payload(v.rest, "Circle")?;
+        return parsed(Circle(r.value), r.rest);
+    }
+    return read_unit_payload(v.rest, Dot);
+}
+Decode(Shape, F) = dec_shape;
+
+Str point_text(Result(Point, SerialError) r) {
+    if (Err(e) = r) { return error_text(e); }
+    if (Ok(p) = r) { return f"({p.x}, {p.y})"; }
+    return "unreachable";
+}
+
+Str shape_text(Result(Shape, SerialError) r) {
+    if (Err(e) = r) { return error_text(e); }
+    if (Ok(v) = r) { return match v { Circle(n) => f"Circle({n})", Dot => "Dot" }; }
+    return "unreachable";
+}
+
+Int main() {
+    // ─── Writing ──────────────────────────────────────────────────────
+    check_text("w/null", text_of(to_json(unit())), "null");
+    check_text("w/true", text_of(to_json(true)), "true");
+    check_text("w/false", text_of(to_json(false)), "false");
+    check_text("w/int", text_of(to_json(0)), "0");
+    check_text("w/negative", text_of(to_json(0 - 42)), "-42");
+    check_text("w/big int", text_of(to_json(1234567890123)), "1234567890123");
+    check_text("w/string", text_of(to_json("hello")), "\"hello\"");
+    check_text("w/empty string", text_of(to_json("")), "\"\"");
+    check_text("w/float", text_of(to_json(1.5)), "1.5");
+    check_text("w/array", text_of(to_json([1, 2, 3])), "[1,2,3]");
+    check_text("w/nested array", text_of(to_json([[1], [2, 3]])), "[[1],[2,3]]");
+    List(Int) noitems = [];
+    check_text("w/empty array", text_of(to_json(noitems)), "[]");
+    check_text("w/struct", text_of(to_json(Point {.x = 1, .y = 2})), "{\"x\":1,\"y\":2}");
+    Option(Int) nothing = None;
+    check_text("w/option none", text_of(to_json(nothing)), "null");
+    check_text("w/option some", text_of(to_json(Some(5))), "5");
+    check_text("w/variant unit", text_of(to_json(Dot)), "\"Dot\"");
+    check_text("w/variant payload", text_of(to_json(Circle(3))), "{\"Circle\":3}");
+    check_text("w/bytes", text_of(to_json(byte_buf([1, 2, 255]))), "\"0102ff\"");
+    check_text("w/utf8", text_of(to_json("héllo")), "\"héllo\"");
+    check_text("w/control chars", text_of(to_json("a\nb")), "\"a\\nb\"");
+
+    // A map's keys are strings, so a number key is written as one.
+    Map(Str, Int) m0 = {};
+    Map(Str, Int) m1 = m0.insert("b", 2);
+    Map(Str, Int) m2 = m1.insert("a", 1);
+    check_text("w/map", text_of(to_json(m2)), "{\"a\":1,\"b\":2}");
+    Map(Int, Int) n0 = {};
+    check_text("w/number keys", text_of(to_json(n0.insert(7, 8))), "{\"7\":8}");
+
+    // ─── Reading ──────────────────────────────────────────────────────
+    check_text("r/int", int_err(from_json("0")), "ok");
+    check_text("r/whitespace", list_text(from_json("  [ 1 , 2 , 3 ] \n")), "[1, 2, 3]");
+    check_text("r/empty array", list_text(from_json("[]")), "[]");
+    check_text("r/negative", int_err(from_json("-42")), "ok");
+    check_text("r/string", str_text(from_json("\"hello\"")), "hello");
+    check_text("r/empty string", str_text(from_json("\"\"")), "");
+    check_text("r/escapes", str_text(from_json("\"a\\\"b\\\\c\\/d\\n\\t\"")), "a\"b\\c/d\n\t");
+    check_text("r/unicode escape", str_text(from_json("\"\\u0041\\u00e9\"")), "Aé");
+    check_text("r/surrogate pair", str_text(from_json("\"\\ud83c\\udf0d\"")), "🌍");
+    check_text("r/utf8 raw", str_text(from_json("\"héllo\"")), "héllo");
+    check_text("r/struct", point_text(from_json("{\"x\":1,\"y\":2}")), "(1, 2)");
+    check_text("r/struct any order", point_text(from_json("{\"y\":2,\"x\":1}")), "(1, 2)");
+    check_text("r/struct extra field", point_text(from_json("{\"x\":1,\"y\":2,\"z\":3}")), "(1, 2)");
+    check_text("r/variant unit", shape_text(from_json("\"Dot\"")), "Dot");
+    check_text("r/variant payload", shape_text(from_json("{\"Circle\":3}")), "Circle(3)");
+    check_text("r/bytes", str_text(from_json("\"0102ff\"")), "0102ff");
+
+    // Numbers, read into the type asked for.
+    check_text("r/float from int", float_text(from_json("2")), "2");
+    check_text("r/float from float", float_text(from_json("2.5")), "2.5");
+    check_text("r/float from exponent", float_text(from_json("2.5e2")), "250");
+    check_text("r/float negative exponent", float_text(from_json("1.5E-2")), "0.015");
+    check_text("r/i128", big_text(from_json("170141183460469231731687303715884105727")), "170141183460469231731687303715884105727");
+    check_text("r/i128 negative", big_text(from_json("-170141183460469231731687303715884105727")), "-170141183460469231731687303715884105727");
+    check_text("r/u128", ubig_text(from_json("340282366920938463463374607431768211455")), "340282366920938463463374607431768211455");
+
+    return 0;
+}
