@@ -1,7 +1,7 @@
 // lex.resid — the two lexical jobs of JSON: numbers in text, and strings
 // with their escapes. Both directions, no format state.
 
-import "../../resid-serial/src/serial.resid";
+import "resid-serial/serial.resid";
 
 // ─── Numbers ─────────────────────────────────────────────────────────
 

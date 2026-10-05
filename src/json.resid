@@ -24,7 +24,7 @@
 // Output is compact: no spaces, no newlines. Whitespace between tokens is
 // accepted on the way in.
 
-import "../../resid-serial/src/serial.resid";
+import "resid-serial/serial.resid";
 import "lex.resid";
 
 // ─── The encoder ─────────────────────────────────────────────────────
